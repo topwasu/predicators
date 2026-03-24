@@ -20,6 +20,9 @@ class GlobalSettings:
     # transitions have been collected, whichever happens first.
     num_online_learning_cycles = 10
     online_learning_max_transitions = float("inf")
+    online_learning_early_stopping = False
+    skip_test_until_last_ite_or_early_stopping = False
+    online_learning_early_stopping_by_test_solve_rate = False  # just for plotting
     # Maximum number of training tasks to give a demonstration for, if the
     # offline_data_method is demo-based.
     max_initial_demos = float("inf")
@@ -55,6 +58,7 @@ class GlobalSettings:
     # either of its arguments is not None.
     allow_state_allclose_comparison_despite_simulator_state = False
 
+    env_include_bbox_features = False
     # cover_multistep_options env parameters
     cover_multistep_action_limits = [-np.inf, np.inf]
     cover_multistep_degenerate_oracle_samplers = False
@@ -64,6 +68,7 @@ class GlobalSettings:
     cover_multistep_bhr_percent = 0.4  # block hand region percent of width
     cover_multistep_bimodal_goal = False
     cover_multistep_goal_conditioned_sampling = False  # assumes one goal
+    cover_blocks_change_color_when_cover = False
 
     # bumpy cover env parameters
     bumpy_cover_num_bumps = 2
@@ -80,6 +85,32 @@ class GlobalSettings:
     blocks_num_blocks_test = [5, 6]
     blocks_holding_goals = False
     blocks_block_size = 0.045  # use 0.0505 for real with panda
+    blocks_high_towers_are_unstable = False
+
+    # balance env parameters
+    balance_num_blocks_train = [2, 4]
+    balance_num_blocks_test = [4, 6]
+    # balance_num_blocks_test = [2]
+    balance_holding_goals = False
+    balance_block_size = 0.045  # use 0.0505 for real with panda
+    balance_wierd_balance = False
+
+    # grow env parameters
+    grow_use_skill_factories = True  # Use skill-factory-based option implementations
+    grow_plant_same_color_as_cup = False
+    grow_weak_pour_terminate_condition = False
+    grow_place_option_no_sampler = False
+    grow_num_cups_train = [2]
+    grow_num_cups_test = [2, 3]
+    grow_num_jugs_train = [2]
+    grow_num_jugs_test = [2]
+
+    # laser env parameters
+    laser_zero_reflection_angle = False
+    laser_use_debug_line_for_beams = False
+
+    # ants env params
+    ants_ants_attracted_to_points = False
 
     # playroom env parameters
     playroom_num_blocks_train = [3]
@@ -150,6 +181,7 @@ class GlobalSettings:
     pybullet_birrt_num_iters = 100
     pybullet_birrt_smooth_amt = 50
     pybullet_birrt_extend_num_interp = 10
+    pybullet_birrt_path_subsample_ratio = 1
     pybullet_control_mode = "position"
     pybullet_max_vel_norm = 0.05
     # env -> robot -> quaternion
@@ -157,6 +189,7 @@ class GlobalSettings:
         # Fetch and Panda gripper down and parallel to x-axis by default.
         lambda: {
             "fetch": (0.5, -0.5, -0.5, -0.5),
+            "mobile_fetch": (0.5, -0.5, -0.5, -0.5),
             "panda": (0.7071, 0.7071, 0.0, 0.0),
         },
         # In Blocks, Fetch gripper down since it's thin we don't need to
@@ -164,9 +197,16 @@ class GlobalSettings:
         {
             "pybullet_blocks": {
                 "fetch": (0.7071, 0.0, -0.7071, 0.0),
+                "mobile_fetch": (0.7071, 0.0, -0.7071, 0.0),
+                "panda": (0.7071, 0.7071, 0.0, 0.0),
+            },
+            "pybullet_balance": {
+                "fetch": (0.7071, 0.0, -0.7071, 0.0),
+                "mobile_fetch": (0.7071, 0.0, -0.7071, 0.0),
                 "panda": (0.7071, 0.7071, 0.0, 0.0),
             }
         })
+    pybullet_ik_validate = True
 
     # IKFast parameters
     ikfast_max_time = 0.05
@@ -315,10 +355,26 @@ class GlobalSettings:
     exit_garage_motion_planning_ignore_obstacles = False
     exit_garage_raise_environment_failure = False
 
+    # skill phase parameters
+    skill_phase_use_motion_planning = False
+
     # coffee env parameters
     coffee_num_cups_train = [1, 2]
     coffee_num_cups_test = [2, 3]
     coffee_jug_init_rot_amt = 2 * np.pi / 3
+    coffee_rotated_jug_ratio = 0.5
+    coffee_twist_sampler = True
+    coffee_combined_move_and_twist_policy = False
+    coffee_move_back_after_place_and_push = False
+    coffee_jug_pickable_pred = False
+    coffee_render_grid_world = False
+    coffee_simple_tasks = False
+    coffee_machine_have_light_bar = True
+    coffee_machine_has_plug = False
+    coffee_use_pixelated_jug = False
+    coffee_plug_break_after_plugged_in = False
+    coffee_fill_jug_gradually = False
+    coffee_use_skill_factories = True  # Use skill-factory-based option implementations
 
     # satellites env parameters
     satellites_num_sat_train = [2, 3]
@@ -354,6 +410,34 @@ class GlobalSettings:
     # grid row env parameters
     grid_row_num_cells = 100
 
+    # float
+    float_water_level_doesnt_raise = False
+
+    # domino
+    domino_debug_layout = False
+    domino_some_dominoes_are_connected = False
+    domino_initialize_at_finished_state = True
+    domino_use_domino_blocks_as_target = False
+    domino_use_grid = False
+    domino_include_connected_predicate = False
+    domino_has_glued_dominos = True
+    domino_prune_actions = False  # Set to True to enable action pruning
+    domino_only_straight_sequence_in_training = True  # Generate only straight sequences during training
+    domino_train_num_dominos = [2]
+    domino_test_num_dominos = [3]
+    domino_train_num_targets = [1]
+    domino_test_num_targets = [1, 2]
+    domino_train_num_pivots = [0]
+    domino_test_num_pivots = [0]
+    domino_train_num_pos_x = 3
+    domino_train_num_pos_y = 2
+    domino_test_num_pos_x = 4  # 5 is too large for robot to reach sometimes
+    domino_test_num_pos_y = 3
+    domino_oracle_knows_glued_dominos = False
+    domino_use_continuous_place = False  # Use PlaceContinuous option instead of Place
+    domino_restricted_push = False  # When True, Push only targets the start block (no domino arg)
+    domino_use_skill_factories = True  # Use skill_factories-based option implementations
+
     # burger env parameters
     burger_render_set_of_marks = True
     # Which type of train/test tasks to generate. Options are "more_stacks",
@@ -364,6 +448,58 @@ class GlobalSettings:
     burger_dummy_render = False
     # Number of test tasks where you start out holding a patty.
     burger_num_test_start_holding = 5
+
+    # circuit
+    circuit_light_doesnt_need_battery = False
+    circuit_battery_in_box = False
+
+    # fan env
+    fan_use_skill_factories = True  # Use skill-factory-based option implementations
+    fan_fans_blow_opposite_direction = False
+    fan_known_controls_relation = True
+    fan_combine_switch_on_off = False
+    fan_use_kinematic = False
+    fan_train_num_pos_x = 3
+    fan_train_num_pos_y = 3
+    fan_test_num_pos_x = 6  # can do 9
+    fan_test_num_pos_y = 4
+    fan_train_num_walls_per_task = [1]
+    fan_test_num_walls_per_task = [2, 3]  # can do 4
+
+    # domino_fan env (combined domino + fan environment)
+    domino_domino_on_stairs = False
+    domino_fan_use_grid = True
+    domino_fan_train_num_dominos = [3, 4]
+    domino_fan_test_num_dominos = [5, 6]
+    domino_fan_train_num_targets = [1]
+    domino_fan_test_num_targets = [1, 2]
+    domino_fan_train_num_walls = [2, 3]
+    domino_fan_test_num_walls = [3, 4]
+    domino_fan_train_grid_size = (5, 5)
+    domino_fan_test_grid_size = (6, 6)
+    domino_fan_ball_task_ratio = 0.5  # Fraction of tasks with ball goals vs domino goals
+    domino_fan_include_ball_in_domino_tasks = True  # Include ball in domino tasks (as obstacle)
+    domino_fan_include_dominoes_in_ball_tasks = False  # Include dominoes in ball tasks
+    domino_fan_ball_position_tolerance = 0.04  # Tolerance for ball reaching target
+    domino_fan_use_kinematic = True  # Use kinematic ball movement (vs dynamic forces)
+    domino_fan_has_glued_dominoes = False  # Include immovable glued dominoes
+
+    # boil env
+    boil_use_skill_factories = True  # Use skill-factory-based option implementations
+    boil_use_constant_delay = False
+    boil_use_normal_delay = True
+    boil_use_cmp_delay = False
+    boil_goal = "simple"  # Can also be "task_completed", "human_happy"
+    boil_goal_simple_human_happy = False  # Require a simpler condition for human happy
+    boil_use_derived_predicates = True
+    boil_require_jug_full_to_heatup = False
+    boil_goal_require_burner_off = True
+    boil_add_jug_reached_capacity_predicate = False
+    boil_num_jugs_train = [1]
+    boil_num_jugs_test = [1, 2]
+    boil_num_burner_train = [1]
+    boil_num_burner_test = [1]
+    boil_water_fill_speed = 0.002
 
     # parameters for random options approach
     random_options_max_tries = 100
@@ -420,6 +556,8 @@ class GlobalSettings:
     llm_model_name = "text-curie-001"  # "text-davinci-002"
     llm_temperature = 0.5
     llm_num_completions = 1
+    # supported provider: "google", "openai", or "openrouter"
+    pretrained_model_service_provider = "openai"
 
     # parameters for vision language models
     # gemini-1.5-pro-latest, gpt-4-turbo, gpt-4o
@@ -432,11 +570,24 @@ class GlobalSettings:
 
     # parameters for the vlm_open_loop planning approach
     vlm_open_loop_use_training_demos = False
+    vlm_open_loop_no_image = False  # Use object-centric state
+
+    # parameters for the human_interaction_approach
+    human_interaction_approach_use_scripted_option = False
+    human_interaction_approach_use_all_options = False
+    scripted_option_dir = "scripted_options"
+    script_option_file_name = "scripted_plan.txt"
+
+    # parameters for the human_low_level_control_approach
+    # Note: actual movement is limited by pybullet_max_vel_norm (default 0.05)
+    # For faster response, also increase pybullet_max_vel_norm
+    human_control_move_speed = 0.15  # meters per step (target delta)
+    human_control_rot_speed = 0.2  # radians per step
 
     # SeSamE parameters
     sesame_task_planner = "astar"  # "astar" or "fdopt" or "fdsat"
     sesame_task_planning_heuristic = "lmcut"
-    sesame_allow_noops = True  # recommended to keep this False if using replays
+    sesame_allow_waits = True  # recommended to keep this False if using replays
     sesame_check_expected_atoms = True
     sesame_use_necessary_atoms = True
     sesame_use_visited_state_set = False
@@ -459,6 +610,9 @@ class GlobalSettings:
     # observed states match (at the abstract level) the expected states, and
     # replan if not. But for now, we just execute each step without checking.
     bilevel_plan_without_sim = False
+    planning_filter_unreachable_nsrt = True
+    planning_check_dr_reachable = True
+    no_repeated_arguments_in_grounding = False
 
     # evaluation parameters
     log_dir = "logs"
@@ -470,6 +624,10 @@ class GlobalSettings:
     image_dir = "images"
     video_fps = 2
     failure_video_mode = "longest_only"
+    terminate_on_goal_reached = True
+    keep_failed_demos = False  # For saving videos
+    terminate_on_goal_reached_and_option_terminated = False
+    env_has_impossible_goals = False
 
     # dataset parameters
     # For learning-based approaches, the data collection timeout for planning.
@@ -495,6 +653,7 @@ class GlobalSettings:
     # STRIPS learning algorithm. See get_name() functions in the directory
     # nsrt_learning/strips_learning/ for valid settings.
     strips_learner = "cluster_and_intersect"
+    clustering_learner_check_effect_equality = True
     disable_harmlessness_check = False  # some methods may want this to be True
     enable_harmless_op_pruning = False  # some methods may want this to be True
     precondition_soft_intersection_threshold_percent = 0.8  # between 0 and 1
@@ -510,6 +669,7 @@ class GlobalSettings:
     cluster_and_search_score_func_max_groundings = 10000
     cluster_and_search_var_count_weight = 0.1
     cluster_and_search_precon_size_weight = 0.01
+    cluster_and_search_llm_propose_batch_size = 4
     cluster_and_intersect_prune_low_data_pnads = False
     # If cluster_and_intersect_prune_low_data_pnads is set to True, PNADs must
     # have at least this fraction of the segments produced by the option that is
@@ -517,9 +677,60 @@ class GlobalSettings:
     # learning.
     cluster_and_intersect_min_datastore_fraction = 0.0
     cluster_and_intersect_soft_intersection_for_preconditions = False
+    find_best_matching_pnad_skip_if_effect_not_subset = True
+    exogenous_process_learner = "cluster_and_intersect"
+    exogenous_process_learner_do_intersect = False
+    only_learn_exogenous_processes = False
+    learn_process_parameters = False
+    use_empirical_init_for_vi_params = False
+    pause_after_process_learning_for_inspection = False
+    learnable_delay_distribution = "cmp"  # "constant", "cmp", "normal"
+    process_learner_check_false_positives = False
+    cluster_and_search_process_learner_parallel_condition = True
+    cluster_and_search_process_learner_parallel_pnad = False
+    process_learner_ablate_bayes = False
+    cluster_and_search_process_learner_llm_select_condition = False
+    cluster_and_search_process_learner_llm_rank_atoms = False
+    cluster_and_search_process_learner_llm_propose_top_conditions = False
+    process_learner_llm_atom_ranking_max_atoms = 10
+    process_learner_llm_propose_conditions_k = 5
+    cluster_and_search_vi_steps = 200
+    cluster_search_max_workers = -1
+    cluster_and_inverse_planning_candidates = "top_consistent"  # "all", "top_consistent"
+    cluster_and_inverse_planning_top_consistent_method = "percentage"  # "number", "percentage", "cost", "percentage_cost"
+    cluster_and_inverse_planning_top_consistent_num = -1
+    cluster_and_inverse_planning_top_p_percent = 3  # percentage of top consistent candidates to use
+    cluster_and_inverse_planning_top_consistent_max_cost = 3
+    cluster_process_learner_top_n_conditions = -1
+    process_scoring_method = "data_likelihood"  # "count_fp", "data_likelihood"
+    process_condition_search_complexity_weight = 1e-4
+    process_param_learning_num_steps = 200
+    process_param_learning_use_empirical = False
+    process_param_learning_patience = None
+    process_param_learning_batch_size = 16
+    process_learning_use_empirical = False
+    process_condition_search_prune_with_fp_count = False
+    process_learning_learn_strength = True
+    process_learning_process_per_physical_core = True  # Physical core vs logical core
+    process_learning_init_at_previous_results = False  # Loading hasn't been very helpful
+    predicate_invent_neural_symbolic_predicates = False
+    predicate_invent_invent_derived_predicates = False
+    cluster_learning_one_effect_per_process = False
+    use_derived_predicate_in_heuristic = True
+    process_planning_heuristic_weight = 1.0
+    build_exogenous_process_index_for_planning = True
+    process_planning_use_abstract_policy = False
+    process_planning_max_policy_guided_rollout = 10
+    process_planning_set_parameters_one = False
+    process_task_planning_heuristic = 'h_ff'
+    wait_option_terminate_on_atom_change = True
+    running_no_invent_baseline = False
 
     # torch GPU usage setting
     use_torch_gpu = False
+
+    # wandb logging setting
+    use_wandb = False
 
     # torch model parameters
     learning_rate = 1e-3
@@ -581,6 +792,9 @@ class GlobalSettings:
     # online NSRT learning parameters
     online_nsrt_learning_requests_per_cycle = 10
     online_learning_max_novelty_count = 0
+    online_nsrt_learning_number_of_tasks_to_try = 1
+    online_nsrt_learning_requests_per_task = 3
+    online_learning_assert_no_exclude_pred = True
 
     # active sampler learning parameters
     active_sampler_learning_model = "myopic_classifier_mlp"
@@ -605,6 +819,7 @@ class GlobalSettings:
     # maple q function parameters
     use_epsilon_annealing = True
     min_epsilon = 0.05
+    maple_q_same_hla_option_param_space = True
 
     # skill competence model parameters
     skill_competence_model = "optimistic"
@@ -657,11 +872,18 @@ class GlobalSettings:
     active_sampler_explorer_skip_perfect = True
     active_sampler_learning_init_cycles_to_pursue_goal = 1
 
+    bilevel_planning_explorer_enumerate_plans = False
+
+    exploit_bilevel_planning_explorer_fallback_explorer = "RandomOptions"
+
     # grammar search invention parameters
+    grammar_search_grammar_use_single_feature = True
     grammar_search_grammar_includes_givens = True
+    grammar_search_grammar_includes_negation = True
     grammar_search_grammar_includes_foralls = True
     grammar_search_grammar_use_diff_features = False
     grammar_search_grammar_use_euclidean_dist = False
+    grammar_search_grammar_use_skip_grammar = True
     grammar_search_use_handcoded_debug_grammar = False
     grammar_search_forall_penalty = 1
     grammar_search_pred_selection_approach = "score_optimization"
@@ -675,6 +897,7 @@ class GlobalSettings:
     grammar_search_predicate_cost_upper_bound = 6
     grammar_search_prune_redundant_preds = True
     grammar_search_score_function = "expected_nodes_created"
+    grammar_search_additional_bonus_for_matching_plan = 0
     grammar_search_heuristic_based_weight = 10.
     grammar_search_max_demos = float("inf")
     grammar_search_max_nondemos = 50
@@ -690,8 +913,8 @@ class GlobalSettings:
     grammar_search_expected_nodes_upper_bound = 1e5
     grammar_search_expected_nodes_optimal_demo_prob = 1 - 1e-5
     grammar_search_expected_nodes_backtracking_cost = 1e3
-    grammar_search_expected_nodes_allow_noops = True
-    grammar_search_classifier_pretty_str_names = ["?x", "?y", "?z"]
+    grammar_search_expected_nodes_allow_waits = True
+    grammar_search_classifier_pretty_str_names = ["?x", "?y", "?z", "?w"]
     grammar_search_vlm_atom_proposal_prompt_type = \
         "options_labels_whole_traj_diverse"
     grammar_search_vlm_atom_label_prompt_type = "per_scene_naive"
@@ -700,6 +923,7 @@ class GlobalSettings:
     grammar_search_select_all_debug = False
     grammar_search_invent_geo_predicates_only = False
     grammar_search_early_termination_heuristic_thresh = 0.0
+    grammar_search_recognizing_unsolvable_goals_bonus = 1000
 
     # grammar search clustering algorithm parameters
     grammar_search_clustering_gmm_num_components = 10
@@ -716,6 +940,50 @@ class GlobalSettings:
     vlm_test_time_atom_label_prompt_type = "per_scene_naive"
     # Whether or not to save eval trajectories
     save_eval_trajs = True
+    rgb_observation = False
+    render_init_state = False
+    use_counterfactual_dataset_path_name = False
+    use_classification_problem_setting = False
+    classification_has_counterfactual_support = True
+
+    # dino similarity approach
+    dino_model_name = "dinov2_vits14"
+    distance_function = "dtw"
+
+    # vlm predicate invention parameters
+    vlm_predicator_oracle_base_predicates = False
+    vlm_predicator_oracle_learned_predicates = False
+    vlm_predicator_use_grammar = True
+    vlm_predicator_num_proposal_batches = 1
+
+    # agent SDK online abstraction learning parameters
+    agent_sdk_model_name = "claude-sonnet-4-6"
+    agent_sdk_max_agent_turns_per_iteration = 20
+    agent_sdk_agent_timeout = 300  # seconds per iteration
+    agent_sdk_resume_session = True  # resume previous session if available
+    agent_sdk_propose_types = True
+    agent_sdk_propose_predicates = True
+    agent_sdk_propose_objects = True
+    agent_sdk_propose_processes = True
+    agent_sdk_propose_options = True
+    agent_sdk_auto_select_predicates = True  # run hill-climbing after proposals
+    agent_sdk_max_trajectories_in_context = 3
+    agent_sdk_log_agent_responses = True
+
+    # Sandbox settings for agent SDK
+    agent_sdk_use_docker_sandbox = False  # run agent inside Docker container
+    agent_sdk_docker_image = "predicators-sandbox"  # Docker image name
+    agent_sdk_use_local_sandbox = False  # sandbox dir with built-in tools, no Docker
+
+    # Agent explorer settings
+    agent_explorer_max_turns = 5  # max agent turns per exploration query
+    agent_explorer_fallback_to_random = True  # fall back to random on failure
+
+    # Agent planner approach settings
+    agent_planner_isolate_test_session = True
+    agent_planner_use_scratchpad = False  # include notes.md scratchpad
+    agent_planner_use_visualize_state = False  # include visualize_state tool
+    agent_planner_use_annotate_scene = False  # include annotate_scene tool
 
     @classmethod
     def get_arg_specific_settings(cls, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -737,6 +1005,17 @@ class GlobalSettings:
                     # tasks take more actions to complete.
                     "pybullet_cover": 1000,
                     "pybullet_blocks": 1000,
+                    "pybullet_coffee": 2000,
+                    "pybullet_balance": 2000,
+                    "pybullet_grow": 2000,
+                    "pybullet_circuit": 2000,
+                    "pybullet_float": 2000,
+                    "pybullet_domino_grid": 2000,
+                    "pybullet_laser": 2000,
+                    "pybullet_ants": 2000,
+                    "pybullet_fan": 2000,
+                    "pybullet_switch": 2000,
+                    "pybullet_barrier": 2000,
                     "doors": 1000,
                     "coffee": 1000,
                     "kitchen": 1000,
@@ -754,6 +1033,8 @@ class GlobalSettings:
                     # For the stick button environment, limit the per-option
                     # horizon.
                     "stick_button": 50,
+                    "pybullet_switch": 2000,
+                    "pybullet_barrier": 2000,
                 })[args.get("env", "")],
 
             # In SeSamE, when to propagate failures back up to the high level
@@ -794,6 +1075,8 @@ class GlobalSettings:
                 {
                     # For these environments, allow more skeletons.
                     "coffee": 1000,
+                    "pybullet_coffee": 100,
+                    "pybullet_coffee_pixel": 100,
                     "exit_garage": 1000,
                     "tools": 1000,
                     "stick_button": 1000,

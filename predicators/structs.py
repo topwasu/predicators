@@ -5,16 +5,19 @@ from __future__ import annotations
 import abc
 import copy
 import itertools
-from dataclasses import dataclass, field
+import random
+from dataclasses import dataclass, field, replace
 from functools import cached_property, lru_cache
 from typing import Any, Callable, Collection, DefaultDict, Dict, Iterator, \
     List, Optional, Sequence, Set, Tuple, TypeVar, Union, cast
 
 import numpy as np
 import PIL.Image
+import torch
 from gym.spaces import Box
 from numpy.typing import NDArray
 from tabulate import tabulate
+from torch import Tensor
 
 import predicators.pretrained_model_interface
 import predicators.utils as utils  # pylint: disable=consider-using-from-import
@@ -23,10 +26,27 @@ from predicators.settings import CFG
 
 @dataclass(frozen=True, order=True)
 class Type:
-    """Struct defining a type."""
+    """Struct defining a type.
+
+    sim_feature_names are features stored in an object, and usually
+    won't change throughout and across tasks. An example is the object's
+    pybullet id.
+    This is convenient for variables that are not easily extractable from the
+    sim state -- whether a food block attracts ants, or the joint id for a
+    switch -- but are nonetheless for running the simulation.
+
+    Why not store all features here instead of storing in the State object?
+    They can only store one value per feature, so if we generate 10 tasks where
+    the blocks are at different locations, it won't be able to store all 10
+    locations. One might think they could reset any feature at when reset is
+    called. But this would require the information is first stored in the State
+    object.
+    """
     name: str
     feature_names: Sequence[str] = field(repr=False)
     parent: Optional[Type] = field(default=None, repr=False)
+    sim_features: Sequence[str] = field(default_factory=lambda: ["id"],
+                                        repr=False)
 
     @property
     def dim(self) -> int:
@@ -43,6 +63,17 @@ class Type:
             curr_type = curr_type.parent
         return ancestors_set
 
+    def pretty_str(self) -> str:
+        """Display the type in a nice human-readable format."""
+        formatted_features = [f"'{name}'" for name in self.feature_names]
+        return f"{self.name}: {{{', '.join(formatted_features)}}}"
+
+    def python_definition_str(self) -> str:
+        """Display in a format similar to how a type is instantiated."""
+        formatted_features = [f"'{name}'" for name in self.feature_names]
+        return f"_{self.name}_type = Type('{self.name}', "+\
+                f"[{', '.join(formatted_features)}])"
+
     def __call__(self, name: str) -> _TypedEntity:
         """Convenience method for generating _TypedEntities."""
         if name.startswith("?"):
@@ -53,7 +84,7 @@ class Type:
         return hash((self.name, tuple(self.feature_names)))
 
 
-@dataclass(frozen=True, order=True, repr=False)
+@dataclass(frozen=False, order=True, repr=False)
 class _TypedEntity:
     """Struct defining an entity with some type, either an object (e.g.,
     block3) or a variable (e.g., ?block).
@@ -88,21 +119,68 @@ class _TypedEntity:
         return False
 
 
-@dataclass(frozen=True, order=True, repr=False)
+@dataclass(frozen=False, order=True, repr=False)
 class Object(_TypedEntity):
     """Struct defining an Object, which is just a _TypedEntity whose name does
     not start with "?"."""
+    sim_data: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         assert not self.name.startswith("?")
+        # Initialize sim_data from the Type's sim_features
+        for sim_feature in self.type.sim_features:
+            self.sim_data[sim_feature] = None  # Default to None
+        # Keep track of allowed attributes
+        self._allowed_attributes = {"sim_data"}.union(self.sim_data.keys())
+
+    def __getattr__(self, name: str) -> Any:
+        # Bypass custom logic for internal attributes
+        # Use object.__getattribute__(...) instead of self.sim_data
+        sim_data = object.__getattribute__(self, "sim_data")
+        if name in sim_data:
+            return sim_data[name]
+        raise AttributeError(
+            f"'{type(self).__name__}' object has no attribute '{name}'")
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        # Always allow the dataclass fields (e.g., "name", "type", "sim_data").
+        if name in {"name", "type", "sim_data", "_allowed_attributes"}:
+            super().__setattr__(name, value)
+            return
+
+        # For anything else, check _allowed_attributes.
+        allowed_attrs = object.__getattribute__(self, "_allowed_attributes") \
+            if object.__getattribute__(self, "__dict__").get(
+                "_allowed_attributes") else set()
+        if name in allowed_attrs:
+            sim_data = object.__getattribute__(self, "sim_data")
+            if name in sim_data:
+                sim_data[name] = value
+            else:
+                super().__setattr__(name, value)
+        else:
+            raise AttributeError(f"Cannot set unknown attribute '{name}'")
 
     def __hash__(self) -> int:
         # By default, the dataclass generates a new __hash__ method when
         # frozen=True and eq=True, so we need to override it.
         return self._hash
 
+    def __eq__(self, other: Any) -> bool:
+        if not isinstance(other, Object):
+            return False
+        return self.name == other.name and self.type == other.type
 
-@dataclass(frozen=True, order=True, repr=False)
+    @cached_property
+    def id_name(self) -> str:
+        try:
+            assert self.id is not None, "Object must have an id set to use id_name"
+        except:
+            breakpoint()
+        return f"{self.type.name}{self.id}"
+
+
+@dataclass(frozen=False, order=True, repr=False)
 class Variable(_TypedEntity):
     """Struct defining a Variable, which is just a _TypedEntity whose name
     starts with "?"."""
@@ -128,6 +206,20 @@ class State:
         # Check feature vector dimensions.
         for obj in self:
             assert len(self[obj]) == obj.type.dim
+
+    def __hash__(self) -> int:
+        # Hash object keys and array contents using numpy's built-in hashing
+        items = []
+        for obj in sorted(self.data.keys()):
+            arr = self.data[obj]
+            if hasattr(arr, 'tobytes'):
+                # For numpy arrays, hash the bytes representation
+                items.append((obj, hash(arr.tobytes())))
+            else:
+                items.append((obj, hash(tuple(arr))))
+
+        data_hash = hash(tuple(items))
+        return data_hash
 
     def __iter__(self) -> Iterator[Object]:
         """An iterator over the state's objects, in sorted order."""
@@ -215,16 +307,45 @@ class State:
         suffix = "\n" + "#" * ll + "\n"
         return prefix + "\n\n".join(table_strs) + suffix
 
-    def dict_str(self, indent: int = 0, object_features: bool = True) -> str:
+    def dict_str(
+        self,
+        indent: int = 0,
+        object_features: bool = True,
+        num_decimal_points: int = 2,
+        use_object_id: bool = False,
+        ignored_features: List[str] = ["capacity_liquid",
+                                       "target_liquid"]) -> str:
         """Return a dictionary representation of the state."""
+        excluded_objects = []
+        if CFG.excluded_objects_in_state_str:
+            excluded_objects = CFG.excluded_objects_in_state_str.split(",")
         state_dict = {}
+
+        # Collect all unique types from objects in the state
+        object_types = set()
         for obj in self:
-            obj_dict = {}
-            if obj.type.name == "robot" or object_features:
-                for attribute, value in zip(obj.type.feature_names, self[obj]):
-                    obj_dict[attribute] = value
-            obj_name = obj.name
-            state_dict[f"{obj_name}:{obj.type.name}"] = obj_dict
+            object_types.add(obj.type)
+
+        # Iterate through types and add all objects of each type
+        for obj_type in sorted(object_types, key=lambda t: t.name):
+            obj_type_name = obj_type.name
+            if obj_type_name not in excluded_objects:
+                # Get all objects of this type
+                objects_of_type = self.get_objects(obj_type)
+
+                # Process each object of this type
+                for obj in objects_of_type:
+                    obj_dict = {}
+                    if obj_type_name == "robot" or object_features:
+                        for attribute, value in zip(obj.type.feature_names,
+                                                    self[obj]):
+                            if attribute not in ignored_features:
+                                obj_dict[attribute] = value
+                    if use_object_id:
+                        obj_name = obj.id_name
+                    else:
+                        obj_name = obj.name
+                    state_dict[f"{obj_name}:{obj.type.name}"] = obj_dict
 
         # Create a string of n_space spaces
         spaces = " " * indent
@@ -233,7 +354,16 @@ class State:
         dict_str = spaces + "{"
         n_keys = len(state_dict.keys())
         for i, (key, value) in enumerate(state_dict.items()):
-            value_str = ', '.join(f"'{k}': {v}" for k, v in value.items())
+            # Format values in the string representation
+            formatted_items = []
+            for k, v in value.items():
+                if isinstance(v, (float, np.floating)):
+                    formatted_items.append(
+                        f"'{k}': {v:.{num_decimal_points}f}")
+                else:
+                    formatted_items.append(f"'{k}': {v}")
+            value_str = ', '.join(formatted_items)
+
             if i == 0:
                 dict_str += f"'{key}': {{{value_str}}},\n"
             elif i == n_keys - 1:
@@ -257,6 +387,9 @@ class Predicate:
     # treated "specially" by the classifier.
     _classifier: Callable[[State, Sequence[Object]],
                           bool] = field(compare=False)
+    natural_language_assertion: Optional[Callable[[List[str]],
+                                                  str]] = field(default=None,
+                                                                compare=False)
 
     def __call__(self, entities: Sequence[_TypedEntity]) -> _Atom:
         """Convenience method for generating Atoms."""
@@ -278,6 +411,18 @@ class Predicate:
 
     def __hash__(self) -> int:
         return self._hash
+
+    def __eq__(self, other: Predicate) -> bool:  # type: ignore[override]
+        # equal by name
+        assert isinstance(other, Predicate)
+        if self.name != other.name:
+            return False
+        if len(self.types) != len(other.types):
+            return False
+        for self_type, other_type in zip(self.types, other.types):
+            if self_type != other_type:
+                return False
+        return True
 
     @cached_property
     def arity(self) -> int:
@@ -320,6 +465,23 @@ class Predicate:
         body_str = f"{self.name}({vars_str_no_types})"
         return vars_str, body_str
 
+    def pretty_str_with_assertion(self) -> str:
+        var_names = []
+        vars_str = []
+        for i, t in enumerate(self.types):
+            vars_str.append(
+                f"{CFG.grammar_search_classifier_pretty_str_names[i]}:{t.name}"
+            )
+            var_names.append(
+                f"{CFG.grammar_search_classifier_pretty_str_names[i]}")
+        vars_str = ", ".join(vars_str)  # type: ignore[assignment]
+
+        body_str = f"{self.name}({vars_str})"
+        if hasattr(self, "natural_language_assertion") and\
+            self.natural_language_assertion is not None:
+            body_str += f": {self.natural_language_assertion(var_names)}"
+        return body_str
+
     def pddl_str(self) -> str:
         """Get a string representation suitable for writing out to a PDDL
         file."""
@@ -342,6 +504,89 @@ class Predicate:
     def __lt__(self, other: Predicate) -> bool:
         return str(self) < str(other)
 
+    def __reduce__(self) -> Tuple:
+        """Tell pickle/dill how to re-create a Predicate:
+
+        (constructor, (name, types, classifier))
+        """
+        # • `tuple(self.types)` ensures the sequence itself is picklable
+        # • `_classifier` must be a top-level def or otherwise dill-pickleable
+        return (self.__class__, (self.name, tuple(self.types),
+                                 self._classifier))
+
+
+@dataclass(frozen=True, order=False, repr=False)
+class DerivedPredicate(Predicate):
+    """Struct defining a concept predicate."""
+    name: str
+    types: Sequence[Type]
+    # The classifier takes in a complete state and a sequence of objects
+    # representing the arguments. These objects should be the only ones
+    # treated "specially" by the classifier.
+    _classifier: Callable[[Set[GroundAtom], Sequence[Object]],
+                          bool] = field(compare=False)
+    untransformed_predicate: Optional[Predicate] = field(default=None,
+                                                         compare=False)
+    auxiliary_predicates: Optional[Set[Predicate]] = field(default=None,
+                                                           compare=False)
+
+    def update_auxiliary_concepts(
+            self,
+            auxiliary_predicates: Set[DerivedPredicate]) -> DerivedPredicate:
+        """Create a new ConceptPredicate with updated auxiliary_concepts."""
+        return replace(self, auxiliary_predicates=auxiliary_predicates
+                       )  # type: ignore[arg-type]
+
+    @cached_property
+    def _hash(self) -> int:
+        # Make the hash the same regardless types is a list or tuple.
+        return hash(self.name + " ".join(t.name for t in self.types))
+
+    def __hash__(self) -> int:
+        return self._hash
+
+    def __eq__(self, other: Predicate) -> bool:  # type: ignore[override]
+        # equal by name
+        assert isinstance(other, Predicate)
+        if self.name != other.name:
+            return False
+        if len(self.types) != len(other.types):
+            return False
+        for self_type, other_type in zip(self.types, other.types):
+            if self_type != other_type:
+                return False
+        return True
+
+    def holds(self, state: Set[GroundAtom],
+              objects: Sequence[Object]) -> bool:  # type: ignore[override]
+        """Public method for calling the classifier.
+
+        Performs type checking first.
+        """
+        assert len(objects) == self.arity
+        for obj, pred_type in zip(objects, self.types):
+            assert isinstance(obj, Object)
+            assert obj.is_instance(pred_type)
+        return self._classifier(state, objects)
+
+    def _negated_classifier(
+            self,
+            state: Set[GroundAtom],  # type: ignore[override]
+            objects: Sequence[Object]) -> bool:
+        # Separate this into a named function for pickling reasons.
+        return not self._classifier(state, objects)
+
+    def __reduce__(self) -> Tuple:
+        """Tell pickle/dill how to re-create a DerivedPredicate:
+
+        (constructor, (name, types, classifier))
+        """
+        # • `tuple(self.types)` ensures the sequence itself is picklable
+        # • `_classifier` must be a top-level def or otherwise dill-pickleable
+        return (self.__class__,
+                (self.name, tuple(self.types), self._classifier,
+                 self.untransformed_predicate, self.auxiliary_predicates))
+
 
 @dataclass(frozen=True, order=False, repr=False, eq=False)
 class VLMPredicate(Predicate):
@@ -352,7 +597,117 @@ class VLMPredicate(Predicate):
     classifier (i.e., one that returns simply raises some kind of error instead
     of actually outputting a value of any kind).
     """
-    get_vlm_query_str: Callable[[Sequence[Object]], str]
+    get_vlm_query_str: Optional[Callable[[Sequence[Object]],
+                                         str]] = field(default=None)
+
+
+class NSPredicate(Predicate):
+    """Neuro-Symbolic Predicate."""
+
+    def __init__(
+        self, name: str, types: Sequence[Type],
+        _classifier: Callable[[RawState, Sequence[Object]], bool]
+    ) -> None:  # type: ignore[name-defined]
+        self._original_classifier = _classifier
+        super().__init__(name, types, _MemoizedClassifier(_classifier))
+
+    @cached_property
+    def _hash(self) -> int:
+        # return hash(str(self))
+        return hash(self.name + str(self.types))
+
+    def __hash__(self) -> int:
+        return self._hash
+
+    def classifier_str(self) -> str:
+        """Get a string representation of the classifier."""
+        clf_str = getsource(
+            self._original_classifier)  # type: ignore[name-defined]
+        clf_str = textwrap.dedent(clf_str)  # type: ignore[name-defined]
+        clf_str = clf_str.replace("@staticmethod\n", "")
+        return clf_str
+
+
+@dataclass
+class _MemoizedClassifier():
+    classifier: Callable[[State, Sequence[Object]],
+                         Union[bool, VLMQuery]]  # type: ignore[name-defined]
+    cache: Dict = field(default_factory=dict)
+
+    def cache_truth_value(self, state: State, objects: Sequence[Object],
+                          truth_value: bool) -> None:
+        """Cache the boolean value after querying the VLM and obtaining the
+        result."""
+        combined_hash = self.hash_state_objs(state, objects)
+        self.cache[combined_hash] = truth_value
+
+    def hash_state_objs(self, state: State, objects: Sequence[Object]) -> int:
+        objects_tuple_hash = hash(tuple(objects))
+        state_hash = state.__hash__()
+        return hash((state_hash, objects_tuple_hash))
+
+    def has_classified(self, state: State, objects: Sequence[Object]) -> bool:
+        """Check if the state, object pair has been stored in the cache."""
+        combined_hash = self.hash_state_objs(state, objects)
+        return combined_hash in self.cache
+
+    def __call__(self, state: State, objects: Sequence[Object]) -> \
+        Union[bool, VLMQuery]:  # type: ignore[name-defined]
+        """When the classifier is called, return the cached value if it exists
+        otherwise call self.classifier."""
+        # if state, object exist in cache, return the value
+        # else compute the truth value using the classifier
+        combined_hash = self.hash_state_objs(state, objects)
+        return self.cache.get(combined_hash, self.classifier(state, objects))
+
+
+@dataclass(frozen=True, order=False, repr=False)
+class ConceptPredicate(Predicate):
+    """Struct defining a concept predicate."""
+    name: str
+    types: Sequence[Type]
+    # The classifier takes in a complete state and a sequence of objects
+    # representing the arguments. These objects should be the only ones
+    # treated "specially" by the classifier.
+    _classifier: Callable[[Set[GroundAtom], Sequence[Object]],
+                          bool] = field(compare=False)
+    untransformed_predicate: Optional[Predicate] = field(default=None,
+                                                         compare=False)
+    auxiliary_concepts: Optional[Set[ConceptPredicate]] = field(default=None,
+                                                                compare=False)
+
+    def update_auxiliary_concepts(
+            self,
+            auxiliary_concepts: Set[ConceptPredicate]) -> ConceptPredicate:
+        """Create a new ConceptPredicate with updated auxiliary_concepts."""
+        return replace(self, auxiliary_concepts=auxiliary_concepts)
+
+    @cached_property
+    def _hash(self) -> int:
+        # return hash(str(self))
+        return hash(self.name + str(self.types))
+
+    def __hash__(self) -> int:
+        return self._hash
+
+    def holds(self, state: Set[GroundAtom],
+              objects: Sequence[Object]) -> bool:  # type: ignore[override]
+        """Public method for calling the classifier.
+
+        Performs type checking first.
+        """
+        assert len(objects) == self.arity
+        for obj, pred_type in zip(objects, self.types):
+            assert isinstance(obj, Object)
+            assert obj.is_instance(pred_type)
+        return self._classifier(state, objects)
+
+    def _negated_classifier(
+            self,
+            state: Set[GroundAtom],  # type: ignore[override]
+            objects: Sequence[Object]) -> bool:
+        # Separate this into a named function for pickling reasons.
+        return not self._classifier(state, objects)
 
 
 @dataclass(frozen=True, repr=False, eq=False)
@@ -405,6 +760,18 @@ class _Atom:
     def __lt__(self, other: object) -> bool:
         assert isinstance(other, _Atom)
         return str(self) < str(other)
+
+    def __reduce__(self) -> Tuple:
+        """Return a pickling recipe: call the class with (predicate, entities).
+
+        - This ensures that when the object is unpickled, all dataclass fields
+        (predicate, entities) are set before anything like hashing or
+        stringification is triggered.
+            - This prevents errors where e.g. self.predicate does not exist yet at
+        the time __hash__ or __str__ is called during deserialization (which is
+        exactly what caused crash during parallel pnad learning).
+        """
+        return (self.__class__, (self.predicate, tuple(self.entities)))
 
 
 @dataclass(frozen=True, repr=False, eq=False)
@@ -465,7 +832,20 @@ class GroundAtom(_Atom):
         """If this GroundAtom is associated with a VLMPredicate, then get the
         string that will be used to query the VLM."""
         assert isinstance(self.predicate, VLMPredicate)
-        return self.predicate.get_vlm_query_str(self.objects)  # pylint:disable=no-member
+        return self.predicate.get_vlm_query_str(self.objects)  # type: ignore[misc]  # pylint:disable=no-member
+
+    def get_negated_atom(self) -> GroundAtom:
+        """Get the negated atom of this GroundAtom."""
+        from predicators.approaches.grammar_search_invention_approach import \
+            _NegationClassifier
+        if isinstance(self.predicate._classifier, _NegationClassifier):
+            return GroundAtom(self.predicate._classifier.body, self.objects)
+        else:
+            # classifier = _NegationClassifier(self.predicate)
+            # negated_predicate = Predicate(str(classifier), self.predicate.types,
+            #     classifier)
+            # return GroundAtom(negated_predicate, self.objects)
+            return GroundAtom(self.predicate.get_negation(), self.objects)
 
 
 @dataclass(frozen=True, eq=False)
@@ -479,6 +859,11 @@ class Task:
     # an "alternative goal" in this field and replace the goal with the
     # alternative goal before giving the task to the agent.
     alt_goal: Optional[Set[GroundAtom]] = field(default_factory=set)
+    # Optional natural language description of the goal.  When present,
+    # approaches can surface this to an LLM agent so it understands the
+    # *intent* behind the goal atoms (e.g. "arrange dominoes so the chain
+    # reaction topples the targets" rather than just Toppled(target0)).
+    goal_nl: Optional[str] = None
 
     def __post_init__(self) -> None:
         # Verify types.
@@ -508,7 +893,7 @@ class Task:
         # demonstrator. To prevent leakage of this information, we discard the
         # original goal.
         if self.alt_goal:
-            return Task(self.init, goal=self.alt_goal)
+            return Task(self.init, goal=self.alt_goal, goal_nl=self.goal_nl)
         return self
 
 
@@ -530,6 +915,8 @@ class EnvironmentTask:
     goal_description: GoalDescription
     # See Task._alt_goal for the reason for this field.
     alt_goal_desc: Optional[GoalDescription] = field(default=None)
+    # Optional natural language goal description (passed through to Task).
+    goal_nl: Optional[str] = None
 
     @cached_property
     def task(self) -> Task:
@@ -539,7 +926,7 @@ class EnvironmentTask:
         # goal exists, then there's nothing particular to set the task's
         # alt_goal field to.
         if self.alt_goal_desc is None:
-            return Task(self.init, self.goal)
+            return Task(self.init, self.goal, goal_nl=self.goal_nl)
         # If we turn the environment task into a task before replacing the goal
         # with the alternative goal, we have to set the task's alt_goal field
         # accordingly to leave open the possibility of doing that replacement
@@ -549,7 +936,10 @@ class EnvironmentTask:
         assert isinstance(self.alt_goal_desc, set)
         for atom in self.alt_goal_desc:
             assert isinstance(atom, GroundAtom)
-        return Task(self.init, self.goal, alt_goal=self.alt_goal_desc)
+        return Task(self.init,
+                    self.goal,
+                    alt_goal=self.alt_goal_desc,
+                    goal_nl=self.goal_nl)
 
     @cached_property
     def init(self) -> State:
@@ -608,6 +998,7 @@ class ParameterizedOption:
     # terminate now. The objects' types will match those in
     # self.types. The parameters will be contained in params_space.
     terminal: ParameterizedTerminal = field(repr=False)
+    params_description: Optional[Tuple[str, ...]] = None
 
     @cached_property
     def _hash(self) -> int:
@@ -630,11 +1021,24 @@ class ParameterizedOption:
 
     def ground(self, objects: Sequence[Object], params: Array) -> _Option:
         """Ground into an Option, given objects and parameter values."""
-        assert len(objects) == len(self.types)
-        for obj, t in zip(objects, self.types):
-            assert obj.is_instance(t)
+        if len(objects) != len(self.types):
+            expected = [t.name for t in self.types]
+            got = [f"{o.name}:{o.type.name}" for o in objects]
+            raise ValueError(
+                f"Cannot ground '{self.name}': expected {len(self.types)} "
+                f"objects {expected}, got {len(objects)} {got}")
+        for i, (obj, t) in enumerate(zip(objects, self.types)):
+            if not obj.is_instance(t):
+                raise TypeError(
+                    f"Cannot ground '{self.name}': object '{obj.name}' at "
+                    f"position {i} has type '{obj.type.name}', "
+                    f"expected '{t.name}'")
         params = np.array(params, dtype=self.params_space.dtype)
-        assert self.params_space.contains(params)
+        if not self.params_space.contains(params):
+            raise ValueError(
+                f"Cannot ground '{self.name}': params {params.tolist()} "
+                f"outside bounds low={self.params_space.low.tolist()}, "
+                f"high={self.params_space.high.tolist()}")
         memory: Dict = {}  # each option has its own memory dict
         return _Option(
             self.name,
@@ -684,6 +1088,26 @@ class _Option:
         action.set_option(self)
         return action
 
+    def __str__(self) -> str:
+        """Full spec including objects and parameters."""
+        objects = ", ".join(o.name for o in self.objects)
+        params = ", ".join(str(round(p, 2)) for p in self.params)
+        return f"{self.name}({objects}, {params})"
+
+    def simple_str(self, use_object_id: bool = False) -> str:
+        """Simple spec without parameters."""
+        if use_object_id:
+            objects = ", ".join(
+                [o.id_name + ":" + o.type.name for o in self.objects])
+        else:
+            objects = ", ".join(o.name for o in self.objects)
+        return f"{self.name}({objects})"
+
+
+DummyParameterizedOption: ParameterizedOption = ParameterizedOption(
+    "DummyParameterizedOption", [], Box(0, 1, (0, )),
+    lambda s, m, o, p: Action(np.array([0.0])), lambda s, m, o, p: False,
+    lambda s, m, o, p: True)
 
 DummyOption: _Option = ParameterizedOption(
     "DummyOption", [], Box(0, 1,
@@ -719,6 +1143,70 @@ class STRIPSOperator:
         return NSRT(self.name, self.parameters, self.preconditions,
                     self.add_effects, self.delete_effects, self.ignore_effects,
                     option, option_vars, sampler)
+
+    def make_endogenous_process(
+        self,
+        option: Optional[ParameterizedOption],
+        option_vars: Optional[Sequence[Variable]],
+        sampler: Optional[NSRTSampler],
+        process_strength: Optional[float] = None,
+        process_delay_params: Optional[Sequence[float]] = None,
+        process_rng: Optional[np.random.Generator] = None,
+    ) -> EndogenousProcess:
+        """Make a CausalProcess out of this STRIPSOperator object."""
+        assert option is not None and option_vars is not None and \
+            sampler is not None
+        if process_delay_params is None:
+            process_delay_params = [5, 1]
+        if process_strength is None:
+            process_strength = 1.0
+        if process_rng is None:
+            process_rng = np.random.default_rng(CFG.seed)
+
+        proc = EndogenousProcess(
+            self.name,
+            self.parameters,
+            condition_at_start=self.preconditions
+            if option.name != "Wait" else set(),
+            condition_overall=set(),
+            condition_at_end=set(),
+            add_effects=self.add_effects if option.name != "Wait" else set(),
+            delete_effects=self.delete_effects
+            if option.name != "Wait" else set(),
+            delay_distribution=utils.CMPDelay(
+                *process_delay_params,  # type: ignore[attr-defined]
+                rng=process_rng),
+            strength=process_strength,  # type: ignore[arg-type]
+            option=option,
+            option_vars=option_vars,
+            _sampler=sampler)
+        return proc
+
+    def make_exogenous_process(
+            self,
+            process_strength: Optional[float] = None,
+            process_delay_params: Optional[Sequence[float]] = None,
+            process_rng: Optional[np.random.Generator] = None
+    ) -> ExogenousProcess:
+        """Make an ExogenousProcess out of this STRIPSOperator object."""
+        if process_delay_params is None:
+            process_delay_params = torch.tensor([1, 1
+                                                 ])  # type: ignore[assignment]
+        if process_strength is None:
+            process_strength = torch.tensor(1.0)  # type: ignore[assignment]
+        dist = utils.DiscreteGaussianDelay(torch.tensor(1), torch.tensor(1))
+
+        proc = ExogenousProcess(
+            self.name,
+            self.parameters,
+            condition_at_start=self.preconditions,
+            condition_overall=self.preconditions,
+            condition_at_end=set(),
+            add_effects=self.add_effects,
+            delete_effects=self.delete_effects,
+            delay_distribution=dist,
+            strength=process_strength)  # type: ignore[arg-type]
+        return proc
 
     @lru_cache(maxsize=None)
     def ground(self, objects: Tuple[Object]) -> _GroundSTRIPSOperator:
@@ -1236,6 +1724,44 @@ class LowLevelTrajectory:
 
 
 @dataclass(frozen=True, repr=False, eq=False)
+class AtomOptionTrajectory:
+    """A structure similar to a LowLevelTrajectory but save atoms at every
+    state, as well as the option that was executed."""
+    _low_level_states: List[State]
+    _states: List[Set[GroundAtom]]
+    _actions: List[_Option]
+    _is_demo: bool = field(default=False)
+    _train_task_idx: Optional[int] = field(default=None)
+
+    def __post_init__(self) -> None:
+        assert len(self._states) == len(self._actions) + 1
+        if self._is_demo:
+            assert self._train_task_idx is not None
+
+    @property
+    def states(self) -> List[Set[GroundAtom]]:
+        """States in the trajectory."""
+        return self._states
+
+    @property
+    def actions(self) -> List[_Option]:
+        """Actions in the trajectory."""
+        return self._actions
+
+    @property
+    def is_demo(self) -> bool:
+        """Whether this trajectory is a demonstration."""
+        return self._is_demo
+
+    @property
+    def train_task_idx(self) -> int:
+        """The index of the train task."""
+        assert self._train_task_idx is not None, \
+            "This trajectory doesn't contain a train task idx!"
+        return self._train_task_idx
+
+
+@dataclass(frozen=True, repr=False, eq=False)
 class ImageOptionTrajectory:
     """A structure similar to a LowLevelTrajectory where we record images at
     every state (i.e., observations), as well as the option that was executed
@@ -1336,6 +1862,66 @@ class Dataset:
             assert self._annotations is not None
             self._annotations.append(annotation)
         self._trajectories.append(trajectory)
+
+
+@dataclass(repr=False, eq=False)
+class ClassificationDataset:
+    """Maybe ultimately a collection of LowLevelTrajectory objects, and a list
+    of labels, one per trajectory.
+
+    There is List[Video] for each episode
+    """
+    task_names: List[str]
+    support_videos: List[List[Video]]
+    support_labels: List[List[int]]
+    query_videos: List[List[Video]]
+    query_labels: List[List[int]]
+    seed: int
+
+    def __post_init__(self) -> None:
+        assert len(self.support_videos) == len(self.support_labels) == \
+                len(self.query_videos) == len(self.query_labels) == \
+                len(self.task_names)
+        self._current_idx: int = 0
+        self._rng = random.Random(self.seed)  # Create a local random generator
+
+    def __iter__(self) -> "Iterator[ClassificationEpisode]":
+        self._current_idx = 0
+        return self
+
+    def __next__(self) -> ClassificationEpisode:
+        if self._current_idx >= len(self.support_videos):
+            raise StopIteration
+
+        episode_name = self.task_names[self._current_idx]
+        episode_support_videos = self.support_videos[self._current_idx]
+        episode_support_labels = self.support_labels[self._current_idx]
+        episode_query_videos = self.query_videos[self._current_idx]
+        episode_query_labels = self.query_labels[self._current_idx]
+
+        assert len(episode_support_videos) == len(episode_support_labels)
+        assert len(episode_query_videos) == len(episode_query_labels)
+
+        # Generate a permutation index for shuffling
+        perm = list(range(len(episode_query_videos)))
+        perm.reverse()
+        # self._rng.shuffle(perm)
+
+        # Apply shuffle to query videos and labels
+        episode_query_videos = [episode_query_videos[i] for i in perm]
+        episode_query_labels = [episode_query_labels[i] for i in perm]
+
+        episode: ClassificationEpisode = (episode_name, episode_support_videos,
+                                          episode_support_labels,
+                                          episode_query_videos,
+                                          episode_query_labels)
+
+        self._current_idx += 1
+        return episode
+
+    def __len__(self) -> int:
+        """The number of episodes in the dataset."""
+        return len(self.support_labels)
 
 
 @dataclass(eq=False)
@@ -1442,26 +2028,37 @@ class PNAD:
 
     def add_to_datastore(self,
                          member: Tuple[Segment, VarToObjSub],
-                         check_effect_equality: bool = True) -> None:
+                         check_effect_equality: bool = True,
+                         check_option_equality: bool = True) -> None:
         """Add a new member to self.datastore."""
         seg, var_obj_sub = member
         if len(self.datastore) > 0:
             # All variables should have a corresponding object.
-            assert set(var_obj_sub) == set(self.op.parameters)
+            if CFG.exogenous_process_learner_do_intersect:
+                # When we don't assume preconditions contain only atoms with
+                # variables present in the effect, we would first include
+                # all the variables in the op.parameters, and the var_obj_sub
+                # only contain parameters that can be unified with the last
+                # segment. So it can be a subset of the op.parameters.
+                assert set(var_obj_sub).issubset(set(self.op.parameters))
+            else:
+                assert set(var_obj_sub) == set(self.op.parameters)
             # The effects should match.
             if check_effect_equality:
                 obj_var_sub = {o: v for (v, o) in var_obj_sub.items()}
                 lifted_add_effects = {
                     a.lift(obj_var_sub)
                     for a in seg.add_effects
+                    if not isinstance(a.predicate, DerivedPredicate)
                 }
                 lifted_del_effects = {
                     a.lift(obj_var_sub)
                     for a in seg.delete_effects
+                    if not isinstance(a.predicate, DerivedPredicate)
                 }
                 assert lifted_add_effects == self.op.add_effects
                 assert lifted_del_effects == self.op.delete_effects
-            if seg.has_option():
+            if seg.has_option() and check_option_equality:
                 # The option should match.
                 option = seg.get_option()
                 part_param_option, part_option_args = self.option_spec
@@ -1476,6 +2073,26 @@ class PNAD:
         assert self.sampler is not None
         param_option, option_vars = self.option_spec
         return self.op.make_nsrt(param_option, option_vars, self.sampler)
+
+    def make_endogenous_process(self) -> EndogenousProcess:
+        """Make an EndogenousProcess from this PNAD."""
+        assert self.sampler is not None
+        param_option, option_vars = self.option_spec
+        return self.op.make_endogenous_process(param_option, option_vars,
+                                               self.sampler)
+
+    def make_exogenous_process(
+            self,
+            process_strength: Optional[float] = None,
+            process_delay_params: Optional[Sequence[float]] = None,
+            process_rng: Optional[np.random.Generator] = None
+    ) -> ExogenousProcess:
+        """Make an ExogenousProcess from this PNAD."""
+        return self.op.make_exogenous_process(
+            process_strength=process_strength,
+            process_delay_params=process_delay_params,
+            process_rng=process_rng,
+        )
 
     def copy(self) -> PNAD:
         """Make a copy of this PNAD object, taking care to ensure that
@@ -1504,6 +2121,13 @@ class PNAD:
 
     def __lt__(self, other: PNAD) -> bool:
         return repr(self) < repr(other)
+
+
+@dataclass(eq=False, repr=False)
+class PAPAD:
+    """Partial Process and Datastore."""
+    # The non option and sampler part of the CausalProcess
+    pprocess: PartialProcess
 
 
 @dataclass(frozen=True, eq=False, repr=False)
@@ -1983,6 +2607,498 @@ class GroundMacro:
         return len(self.ground_nsrts)
 
 
+@dataclass(frozen=False, repr=False, eq=False)
+class DelayDistribution:
+
+    def set_parameters(self, parameters: Sequence[torch.Tensor],
+                       **kwargs: Any) -> None:
+        raise NotImplementedError
+
+    def get_parameters(self) -> Sequence[float]:
+        raise NotImplementedError
+
+    def sample(self) -> int:
+        raise NotImplementedError
+
+    def log_prob(self, k: Union[int, torch.Tensor]) -> torch.Tensor:
+        raise NotImplementedError
+
+    def __str__(self) -> str:
+        return self._str
+
+    @cached_property
+    def _str(self) -> str:
+        raise NotImplementedError
+
+
+@dataclass(frozen=False, repr=False, eq=False)
+class PartialProcess:
+    pass
+
+
+@dataclass(frozen=False, repr=False, eq=False)
+class CausalProcess(abc.ABC):
+    name: str
+    parameters: Sequence[Variable]
+    condition_at_start: Set[LiftedAtom]
+    condition_overall: Set[LiftedAtom]
+    condition_at_end: Set[LiftedAtom]
+    add_effects: Set[LiftedAtom]
+    delete_effects: Set[LiftedAtom]
+    delay_distribution: DelayDistribution
+    strength: torch.Tensor
+
+    @abc.abstractmethod
+    def ground(self, objects: Sequence[Object]) -> _GroundCausalProcess:
+        pass
+
+    @abc.abstractmethod
+    def copy(self) -> CausalProcess:
+        """Create a deep copy of this causal process."""
+        pass
+
+    @abc.abstractmethod
+    def filter_predicates(self, kept: Collection[Predicate]) -> CausalProcess:
+        """Keep only the given predicates in the preconditions, add effects,
+        delete effects, and ignore effects.
+
+        Note that the parameters must stay the same for the sake of the
+        sampler inputs.
+        """
+        pass
+
+    def _set_parameters(self, parameters: Sequence[float],
+                        **kwargs: Any) -> None:
+        self.strength = parameters[0]  # type: ignore[assignment]
+        self.delay_distribution.set_parameters(
+            parameters[1:], **kwargs)  # type: ignore[arg-type]
+        # Invalidate cached properties
+        if '_str' in self.__dict__:
+            del self.__dict__['_str']
+        if '_hash' in self.__dict__:
+            del self.__dict__['_hash']
+
+    def _get_parameters(self) -> Sequence[float]:
+        """Get the parameters of this CausalProcess.
+
+        The first parameter is the strength, and the rest are the delay
+        distribution parameters.
+        """
+        return [
+            self.strength
+        ] + self.delay_distribution.get_parameters()  # type: ignore[operator]
+
+    def delay_probability(self, delay: int) -> float:
+        return self.delay_distribution.probability(
+            delay)  # type: ignore[attr-defined]
+
+    @cached_property
+    def _hash(self) -> int:
+        return hash(str(self))
+
+    def __hash__(self) -> int:
+        return self._hash
+
+    @cached_property
+    def _str(self) -> str:
+        ignore_effects_str = ""
+        if hasattr(self, 'ignore_effects') and isinstance(
+                self.ignore_effects, set):
+            ignore_effects_str = f"\n    Ignore Effects: {sorted(self.ignore_effects, key=str)}"
+        return f"""    Parameters: {self.parameters}
+    Conditions at start: {sorted(self.condition_at_start, key=str)}
+    Conditions overall: {sorted(self.condition_overall, key=str)}
+    Conditions at end: {sorted(self.condition_at_end, key=str)}
+    Add Effects: {sorted(self.add_effects, key=str)}
+    Delete Effects: {sorted(self.delete_effects, key=str)}{ignore_effects_str}
+    Log Strength: {self.strength:.4f}
+    Delay Distribution: {self.delay_distribution}"""
+
+    @cached_property
+    def _str_wo_params(self) -> str:
+        return f"""    Parameters: {self.parameters}
+    Conditions at start: {sorted(self.condition_at_start, key=str)}
+    Conditions overall: {sorted(self.condition_overall, key=str)}
+    Conditions at end: {sorted(self.condition_at_end, key=str)}
+    Add Effects: {sorted(self.add_effects, key=str)}
+    Delete Effects: {sorted(self.delete_effects, key=str)}"""
+
+    def __str__(self) -> str:
+        return self._str
+
+    def __repr__(self) -> str:
+        return str(self)
+
+    def __eq__(self, other: object) -> bool:
+        assert isinstance(other, CausalProcess)
+        return str(self) == str(other)
+
+    def __lt__(self, other: object) -> bool:
+        assert isinstance(other, CausalProcess)
+        return str(self) < str(other)
+
+    def __gt__(self, other: object) -> bool:
+        assert isinstance(other, CausalProcess)
+        return str(self) > str(other)
+
+    def get_complexity(self) -> float:
+        """Get the complexity of this operator.
+
+        We only care about the arity of the operator, since that is what
+        affects grounding. We'll use 2^arity as a measure of grounding
+        effort.
+        """
+        return float(2**len(self.parameters))
+
+
+@dataclass(frozen=False, repr=False, eq=False)
+class ExogenousProcess(CausalProcess):
+
+    def copy(self) -> ExogenousProcess:
+        """Create a deep copy of this exogenous process."""
+        return ExogenousProcess(
+            name=self.name,
+            parameters=list(self.parameters),
+            condition_at_start=self.condition_at_start.copy(),
+            condition_overall=self.condition_overall.copy(),
+            condition_at_end=self.condition_at_end.copy(),
+            add_effects=self.add_effects.copy(),
+            delete_effects=self.delete_effects.copy(),
+            delay_distribution=self.delay_distribution.copy(
+            ),  # type: ignore[attr-defined]
+            strength=self.strength.clone())
+
+    def filter_predicates(self,
+                          kept: Collection[Predicate]) -> ExogenousProcess:
+        condition_at_start = {a for a in self.condition_at_start if a.predicate\
+                                in kept}
+        condition_overall = {a for a in self.condition_overall if a.predicate\
+                                in kept}
+        condition_at_end = {a for a in self.condition_at_end if a.predicate\
+                                in kept}
+        add_effects = {a for a in self.add_effects if a.predicate in kept}
+        delete_effects = {
+            a
+            for a in self.delete_effects if a.predicate in kept
+        }
+
+        return ExogenousProcess(self.name, self.parameters, condition_at_start,
+                                condition_overall, condition_at_end,
+                                add_effects, delete_effects,
+                                self.delay_distribution, self.strength)
+
+    @cached_property
+    def _str(self) -> str:
+        process_str = super()._str
+        return f"""ExogenousProcess-{self.name}:
+{process_str}"""
+
+    @cached_property
+    def _str_wo_params(self) -> str:
+        process_str = super()._str_wo_params
+        return f"""ExogenousProcess-{self.name}:
+{process_str}"""
+
+    def ground(self, objects: Sequence[Object]) -> _GroundExogenousProcess:
+        assert len(objects) == len(self.parameters)
+        assert all(
+            o.is_instance(p.type) for o, p in zip(objects, self.parameters))
+        sub = dict(zip(self.parameters, objects))
+        condition_at_start = {a.ground(sub) for a in self.condition_at_start}
+        condition_overall = {a.ground(sub) for a in self.condition_overall}
+        condition_at_end = {a.ground(sub) for a in self.condition_at_end}
+        add_effects = {a.ground(sub) for a in self.add_effects}
+        delete_effects = {a.ground(sub) for a in self.delete_effects}
+        return _GroundExogenousProcess(self, objects, condition_at_start,
+                                       condition_overall, condition_at_end,
+                                       add_effects, delete_effects)
+
+
+@dataclass(frozen=False, repr=False, eq=False)
+class EndogenousProcess(CausalProcess):
+    option: ParameterizedOption
+    option_vars: Sequence[Variable]
+    _sampler: NSRTSampler = field(repr=False)
+    ignore_effects: Set[Predicate] = field(default_factory=set)
+
+    def copy(self) -> EndogenousProcess:
+        """Create a deep copy of this endogenous process."""
+        return EndogenousProcess(
+            name=self.name,
+            parameters=list(self.parameters),
+            condition_at_start=self.condition_at_start.copy(),
+            condition_overall=self.condition_overall.copy(),
+            condition_at_end=self.condition_at_end.copy(),
+            add_effects=self.add_effects.copy(),
+            delete_effects=self.delete_effects.copy(),
+            delay_distribution=self.delay_distribution.copy(
+            ),  # type: ignore[attr-defined]
+            strength=self.strength.clone(),
+            option=self.option.copy(),  # type: ignore[attr-defined]
+            option_vars=self.option_vars.copy(),  # type: ignore[attr-defined]
+            _sampler=self._sampler.copy(),  # type: ignore[attr-defined]
+            ignore_effects=self.ignore_effects.copy(),
+        )
+
+    def filter_predicates(self,
+                          kept: Collection[Predicate]) -> EndogenousProcess:
+        """Keep only the given predicates in the preconditions, add effects,
+        delete effects, and ignore effects.
+
+        Note that the parameters must stay the same for the sake of the
+        sampler inputs.
+        """
+        condition_at_start = {a for a in self.condition_at_start if a.predicate\
+                                in kept}
+        condition_overall = {a for a in self.condition_overall if a.predicate\
+                                in kept}
+        condition_at_env = {a for a in self.condition_at_end if a.predicate\
+                                in kept}
+        add_effects = {a for a in self.add_effects if a.predicate in kept}
+        delete_effects = {
+            a
+            for a in self.delete_effects if a.predicate in kept
+        }
+        ignore_effects = {a for a in self.ignore_effects if a in kept}
+
+        return EndogenousProcess(self.name, self.parameters,
+                                 condition_at_start, condition_overall,
+                                 condition_at_env, add_effects, delete_effects,
+                                 self.delay_distribution, self.strength,
+                                 self.option, self.option_vars, self._sampler,
+                                 ignore_effects)
+
+    def ground(self, objects: Sequence[Object]) -> _GroundEndogenousProcess:
+        assert len(objects) == len(self.parameters)
+        assert all(
+            o.is_instance(p.type) for o, p in zip(objects, self.parameters))
+        sub = dict(zip(self.parameters, objects))
+        condition_at_start = {a.ground(sub) for a in self.condition_at_start}
+        condition_overall = {a.ground(sub) for a in self.condition_overall}
+        condition_at_end = {a.ground(sub) for a in self.condition_at_end}
+        add_effects = {a.ground(sub) for a in self.add_effects}
+        delete_effects = {a.ground(sub) for a in self.delete_effects}
+        option_objs = [sub[v] for v in self.option_vars]
+        return _GroundEndogenousProcess(self, objects, condition_at_start,
+                                        condition_overall, condition_at_end,
+                                        add_effects, delete_effects,
+                                        self.option, option_objs,
+                                        self._sampler)
+
+    @cached_property
+    def _str(self) -> str:
+        option_var_str = ", ".join([str(v) for v in self.option_vars])
+        process_str = super()._str
+        return f"""EndogenousProcess-{self.name}:
+{process_str}
+    Option Spec: {self.option.name}({option_var_str})"""
+
+
+@dataclass(frozen=False, repr=False, eq=False)
+class _GroundCausalProcess:
+    parent: CausalProcess
+    objects: Sequence[Object]
+    condition_at_start: Set[GroundAtom]
+    condition_overall: Set[GroundAtom]
+    condition_at_end: Set[GroundAtom]
+    add_effects: Set[GroundAtom]
+    delete_effects: Set[GroundAtom]
+
+    @property
+    def delay_distribution(self) -> DelayDistribution:
+        """The delay distribution of the parent CausalProcess."""
+        return self.parent.delay_distribution
+
+    @property
+    def strength(self) -> float:
+        """The strength of the parent CausalProcess."""
+        return self.parent.strength  # type: ignore[return-value]
+
+    @abc.abstractmethod
+    def cause_triggered(self, state_history: List[Set[GroundAtom]],
+                        action_history: List[_Option]) -> bool:
+        raise NotImplementedError
+
+    def effect_factor(self, state: Set[GroundAtom]) -> float:
+        """Compute the effect factor of this ground causal process on the
+        state."""
+        return int(
+            self.add_effects.issubset(state)
+            and not self.delete_effects.issubset(state)) * self.strength
+
+    def factored_effect_factor(self, y_tj: bool, factor_atom: GroundAtom,
+                               prev_val: bool) -> Tensor:
+        """If x_tj is True, we say that x_tj would get the effect factor of a
+        process if at this time step, factor_atom is in the add effects and not
+        in the delete effects of the process.
+
+        If x_tj is False in the current step t, then we say that x_tj
+        would get effect from the effect factor of a process if at this
+        time step, x_tj is in the delete effects and not in the add
+        effects of the process.
+        """
+        # match1 requires in the x_tj = False case because match1 requires that
+        # (atom in not add_effects or in delete_effects) simply be true,
+        # whereas match2 requires specifically that
+        # (atom in delete_effects and not in add_effects) be true.
+        # match1 = (factor_atom in self.add_effects and
+        #          factor_atom not in self.delete_effects) == x_tj
+        if y_tj:
+            match = int(y_tj != prev_val and factor_atom in self.add_effects
+                        and factor_atom not in self.delete_effects)
+        else:
+            match = int(y_tj != prev_val and factor_atom in self.delete_effects
+                        and factor_atom not in self.add_effects)
+        return match * self.strength  # type: ignore[return-value]
+
+    @property
+    def name(self) -> str:
+        """Name of this ground causal process."""
+        return self.parent.name
+
+    @cached_property
+    def _str(self) -> str:
+        return f"""GroundProcess-{self.name}:
+    Parameters: {self.objects}
+    Conditions at start: {sorted(self.condition_at_start, key=str)}
+    Conditions overall: {sorted(self.condition_overall, key=str)}
+    Conditions at end: {sorted(self.condition_at_end, key=str)}
+    Add Effects: {sorted(self.add_effects, key=str)}
+    Delete Effects: {sorted(self.delete_effects, key=str)}"""
+
+    @cached_property
+    def _hash(self) -> int:
+        return hash(str(self))
+
+    def __str__(self) -> str:
+        return self._str
+
+    def __repr__(self) -> str:
+        return str(self)
+
+    def __hash__(self) -> int:
+        return self._hash
+
+    def __eq__(self, other: object) -> bool:
+        assert isinstance(other, _GroundCausalProcess)
+        return str(self) == str(other)
+
+    def __lt__(self, other: object) -> bool:
+        assert isinstance(other, _GroundCausalProcess)
+        return str(self) < str(other)
+
+    def __gt__(self, other: object) -> bool:
+        assert isinstance(other, _GroundCausalProcess)
+        return str(self) > str(other)
+
+    def name_and_objects_str(self) -> str:
+        return f"{self.name}({', '.join([str(o) for o in self.objects])})"
+
+
+@dataclass(frozen=False, repr=False, eq=False)
+class _GroundEndogenousProcess(_GroundCausalProcess):
+    option: ParameterizedOption
+    option_objs: Sequence[Object]
+    _sampler: NSRTSampler = field(repr=False)
+
+    @property
+    def ignore_effects(self) -> Set[Predicate]:
+        """Ignore effects from the parent."""
+        return self.parent.ignore_effects  # type: ignore[attr-defined]
+
+    @cached_property
+    def _str(self) -> str:
+        return f"""Process-{self.name}:
+    Parameters: {self.objects}
+    Conditions at start: {sorted(self.condition_at_start, key=str)}
+    Conditions overall: {sorted(self.condition_overall, key=str)}
+    Conditions at end: {sorted(self.condition_at_end, key=str)}
+    Add Effects: {sorted(self.add_effects, key=str)}
+    Delete Effects: {sorted(self.delete_effects, key=str)}
+    Ignore Effects: {sorted(self.ignore_effects, key=str)}
+    Option: {self.option}
+    Option Objects: {self.option_objs}"""
+
+    def cause_triggered(self, state_history: List[Set[GroundAtom]],
+                        action_history: List[_Option]) -> bool:
+        """Check if this endogenous process was triggered by the last
+        action."""
+
+        def check_wo_s(state: Set[GroundAtom], action: _Option) -> bool:
+            return (action.parent == self.option
+                    and action.objects == self.option_objs)
+
+        def check_w_s(state: Set[GroundAtom], action: _Option) -> bool:
+            return (action.parent == self.option
+                    and action.objects == self.option_objs
+                    and self.condition_at_start.issubset(state))
+
+        # if self.name == "SwitchFaucetOff" and check_wo_s(state_history[-1],
+        #                                                  action_history[-1]):
+        #     breakpoint()
+        return check_w_s(state_history[-1], action_history[-1]) and (
+            len(state_history) == 1
+            or not check_wo_s(state_history[-2], action_history[-2]))
+
+    def copy(self) -> _GroundEndogenousProcess:
+        """Make a copy of this _GroundEndogenousProcess object."""
+        new_condition_at_start = set(self.condition_at_start)
+        new_condition_overall = set(self.condition_overall)
+        new_condition_at_end = set(self.condition_at_end)
+        new_add_effects = set(self.add_effects)
+        new_delete_effects = set(self.delete_effects)
+        return _GroundEndogenousProcess(self.parent, self.objects,
+                                        new_condition_at_start,
+                                        new_condition_overall,
+                                        new_condition_at_end, new_add_effects,
+                                        new_delete_effects, self.option,
+                                        self.option_objs, self._sampler)
+
+    def sample_option(self, state: State, goal: Set[GroundAtom],
+                      rng: np.random.Generator) -> _Option:
+        """Sample an _Option for this ground NSRT, by invoking the contained
+        sampler.
+
+        On the Option that is returned, one can call, e.g.,
+        policy(state).
+        """
+        # Note that the sampler takes in ALL self.objects, not just the subset
+        # self.option_objs of objects that are passed into the option.
+        params = self._sampler(state, goal, rng, self.objects)
+        # Clip the params into the params_space of self.option, for safety.
+        low = self.option.params_space.low
+        high = self.option.params_space.high
+        params = np.clip(params, low, high)
+        return self.option.ground(self.option_objs, params)
+
+
+@dataclass(frozen=False, repr=False, eq=False)
+class _GroundExogenousProcess(_GroundCausalProcess):
+
+    def cause_triggered(self, state_history: List[Set[GroundAtom]],
+                        action_history: List[_Option]) -> bool:
+        """Check if this exogenous process was triggered by the last action."""
+
+        def check(state: Set[GroundAtom]) -> bool:
+            return self.condition_at_start.issubset(state)
+
+        return check(state_history[-1]) and (len(state_history) == 1
+                                             or not check(state_history[-2]))
+
+    def copy(self) -> _GroundExogenousProcess:
+        """Make a copy of this _GroundExogenousProcess object."""
+        new_condition_at_start = set(self.condition_at_start)
+        new_condition_overall = set(self.condition_overall)
+        new_condition_at_end = set(self.condition_at_end)
+        new_add_effects = set(self.add_effects)
+        new_delete_effects = set(self.delete_effects)
+        return _GroundExogenousProcess(self.parent, self.objects,
+                                       new_condition_at_start,
+                                       new_condition_overall,
+                                       new_condition_at_end, new_add_effects,
+                                       new_delete_effects)
+
+
 # Convenience higher-order types useful throughout the code
 Observation = Any
 GoalDescription = Any
@@ -2029,6 +3145,12 @@ ParameterizedInitiable = Callable[[State, Dict, Sequence[Object], Array], bool]
 ParameterizedTerminal = Callable[[State, Dict, Sequence[Object], Array], bool]
 AbstractPolicy = Callable[[Set[GroundAtom], Set[Object], Set[GroundAtom]],
                           Optional[_GroundNSRT]]
+AbstractProcessPolicy = Callable[
+    [Set[GroundAtom], Set[Object], Set[GroundAtom]],
+    Optional[_GroundEndogenousProcess]]
 RGBA = Tuple[float, float, float, float]
 BridgePolicy = Callable[[State, Set[GroundAtom], List[_Option]], _Option]
 BridgeDataset = List[Tuple[Set[_Option], _GroundNSRT, Set[GroundAtom], State]]
+Mask = NDArray[np.bool_]
+ClassificationEpisode = Tuple[str, List[Video], List[int], List[Video],
+                              List[int]]

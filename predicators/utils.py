@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import abc
 import contextlib
+import copy
+import datetime
 import functools
 import gc
 import heapq as hq
@@ -18,15 +20,19 @@ import subprocess
 import sys
 import time
 from argparse import ArgumentParser
-from collections import defaultdict
+from collections import defaultdict, namedtuple
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
+from pprint import pformat
 from typing import TYPE_CHECKING, Any, Callable, ClassVar, Collection, Dict, \
-    FrozenSet, Generator, Generic, Hashable, Iterator, List, Optional, \
-    Sequence, Set, Tuple
+    FrozenSet, Generator, Generic, Hashable, Iterable, Iterator, List, \
+    Optional, Sequence, Set, Tuple
 from typing import Type as TypingType
 from typing import TypeVar, Union, cast
 
+import colorlog
 import dill as pkl
 import imageio
 import matplotlib
@@ -34,6 +40,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pathos.multiprocessing as mp
 import PIL.Image
+import torch
 from gym.spaces import Box
 from matplotlib import patches
 from numpy.typing import NDArray
@@ -44,18 +51,21 @@ from pyperplan.planner import HEURISTICS as _PYPERPLAN_HEURISTICS
 from scipy.stats import beta as BetaRV
 
 from predicators.args import create_arg_parser
+from predicators.image_patch_wrapper import ImagePatch
 from predicators.pretrained_model_interface import GoogleGeminiLLM, \
-    GoogleGeminiVLM, LargeLanguageModel, OpenAILLM, OpenAIVLM, \
-    VisionLanguageModel
+    GoogleGeminiVLM, LargeLanguageModel, OpenAILLM, OpenAIVLM, OpenRouterLLM, \
+    OpenRouterVLM, VisionLanguageModel
 from predicators.pybullet_helpers.joint import JointPositions
 from predicators.settings import CFG, GlobalSettings
-from predicators.structs import NSRT, Action, Array, DummyOption, \
-    EntToEntSub, GroundAtom, GroundAtomTrajectory, \
+from predicators.structs import NSRT, Action, Array, AtomOptionTrajectory, \
+    CausalProcess, DelayDistribution, DerivedPredicate, DummyOption, \
+    EntToEntSub, ExogenousProcess, GroundAtom, GroundAtomTrajectory, \
     GroundNSRTOrSTRIPSOperator, Image, LDLRule, LiftedAtom, \
-    LiftedDecisionList, LiftedOrGroundAtom, LowLevelTrajectory, Metrics, \
-    NSRTOrSTRIPSOperator, Object, ObjectOrVariable, Observation, OptionSpec, \
-    ParameterizedOption, Predicate, Segment, State, STRIPSOperator, Task, \
-    Type, Variable, VarToObjSub, Video, VLMPredicate, _GroundLDLRule, \
+    LiftedDecisionList, LiftedOrGroundAtom, LowLevelTrajectory, Mask, \
+    Metrics, NSRTOrSTRIPSOperator, Object, ObjectOrVariable, Observation, \
+    OptionSpec, ParameterizedOption, Predicate, Segment, State, \
+    STRIPSOperator, Task, Type, Variable, VarToObjSub, Video, VLMPredicate, \
+    _GroundEndogenousProcess, _GroundExogenousProcess, _GroundLDLRule, \
     _GroundNSRT, _GroundSTRIPSOperator, _Option, _TypedEntity
 from predicators.third_party.fast_downward_translator.translate import \
     main as downward_translate
@@ -962,8 +972,12 @@ class LinearChainParameterizedOption(ParameterizedOption):
             memory["current_child_index"] = current_index
             current_child = self._children[current_index]
             child_memory = memory["child_memory"][current_index]
-            assert current_child.initiable(state, child_memory, objects,
-                                           params)
+            try:
+                assert current_child.initiable(state, child_memory, objects,
+                                               params)
+            except:
+                breakpoint()
+        # logging.debug(f"Executing {current_child.name}")
         return current_child.policy(state, child_memory, objects, params)
 
     def _terminal(self, state: State, memory: Dict, objects: Sequence[Object],
@@ -1035,16 +1049,362 @@ class PyBulletState(State):
     @property
     def joint_positions(self) -> JointPositions:
         """Expose the current joints state in the simulator_state."""
-        return cast(JointPositions, self.simulator_state)
+        # if the simulator state is an array
+        if isinstance(self.simulator_state, Dict):
+            jp = self.simulator_state["joint_positions"]
+        else:
+            jp = self.simulator_state
+        return cast(JointPositions, jp)
+
+    @property
+    def state_image(self) -> Image:
+        """Expose the current image state in the simulator_state."""
+        assert isinstance(self.simulator_state, Dict)
+        return self.simulator_state["unlabeled_image"]
+
+    @property
+    def labeled_image(self) -> Optional[Image]:
+        """Expose the current image state in the simulator_state."""
+        assert isinstance(self.simulator_state, Dict)
+        return self.simulator_state.get("images")
+
+    @property
+    def obj_mask_dict(self) -> Optional[Dict[Object, Mask]]:
+        """Expose the current object masks in the simulator_state."""
+        assert isinstance(self.simulator_state, Dict)
+        return self.simulator_state.get("obj_mask_dict")
 
     def allclose(self, other: State) -> bool:
         # Ignores the simulator state.
         return State(self.data).allclose(State(other.data))
 
-    def copy(self) -> State:
-        state_dict_copy = super().copy().data
-        simulator_state_copy = list(self.joint_positions)
+    def copy(self) -> PyBulletState:
+        copy = super().copy()
+        state_dict_copy = copy.data
+        # simulator_state_copy = list(self.joint_positions)
+        simulator_state_copy = copy.simulator_state
         return PyBulletState(state_dict_copy, simulator_state_copy)
+
+    def get_obj_mask(self, obj: Object) -> Mask:
+        """Return the mask for the object."""
+        assert self.obj_mask_dict is not None
+        mask = self.obj_mask_dict.get(obj)
+        assert mask is not None
+        return mask
+
+    def label_all_objects(self) -> None:
+        """Label all objects in the simulator state."""
+        state_ip = ImagePatch(self)
+        obj_mask_dict = self.obj_mask_dict
+        assert obj_mask_dict is not None
+        state_ip.label_all_objects(obj_mask_dict)
+        assert isinstance(self.simulator_state, Dict)
+        self.simulator_state["images"] = state_ip.cropped_image_in_PIL
+
+    def add_images_and_masks(self, unlabeled_image: PIL.Image.Image,
+                             masks: Dict[Object, Mask]) -> None:
+        """Add the unlabeled image and object masks to the simulator state."""
+        assert isinstance(self.simulator_state, Dict)
+        self.simulator_state["unlabeled_image"] = unlabeled_image
+        self.simulator_state["obj_mask_dict"] = masks
+        self.label_all_objects()
+
+
+BoundingBox = namedtuple('BoundingBox', 'left lower right upper')
+
+
+@dataclass
+class RawState(PyBulletState):
+    state_image: PIL.Image.Image = None  # type: ignore[assignment]
+    obj_mask_dict: Dict[Object, Mask] = field(default_factory=dict)
+    labeled_image: Optional[PIL.Image.Image] = None  # type: ignore[assignment]
+    option_history: Optional[List[str]] = None
+    bbox_features: Dict[Object, np.ndarray] = field(
+        default_factory=lambda: defaultdict(lambda: np.zeros(4)))
+    prev_state: Optional[RawState] = None
+    next_state: Optional[RawState] = None
+
+    def __hash__(self) -> int:
+        # Convert the dictionary to a tuple of key-value pairs and hash it
+        # data_hash = hash(tuple(sorted(self.data.items())))
+        data_tuple = tuple((k, tuple(v)) for k, v in sorted(self.data.items()))
+        if self.simulator_state is not None:
+            data_tuple += tuple(self.simulator_state)
+        data_hash = hash(data_tuple)
+        # # Hash the simulator_state
+        # simulator_state_hash = hash(self.simulator_state)
+        # Combine the two hashes
+        # return hash((data_hash, simulator_state_hash))
+        return data_hash
+
+    def evaluate_simple_assertion(
+            self, assertion: str, image: Tuple[BoundingBox,
+                                               Sequence[Object]]) -> VLMQuery:
+        """Given an assertion and an image, queries a VLM and returns whether
+        the assertion is true or false."""
+        bbox, objs = image
+        return VLMQuery(assertion, bbox, list(objs))
+
+    def generate_previous_option_message(self) -> str:
+        """Generate the message for the previous option."""
+        assert self.option_history is not None
+        msg = "Evaluate the truth value of the following assertions in the "\
+                "current state as depicted by the image"
+        if CFG.nsp_pred_include_prev_image_in_prompt and \
+            self.prev_state is not None:
+            msg += " labeled with 'curr. state'"
+        if CFG.nsp_pred_include_state_str_in_prompt:
+            msg += " and the information below"
+
+        msg += ".\n"
+
+        if CFG.nsp_pred_include_state_str_in_prompt:
+            msg += f"We have the object positions and the robot's "\
+                    "proprioception:\n"
+            msg += self.dict_str(indent=2,
+                                 object_features=False,
+                                 use_object_id=True,
+                                 position_proprio_features=True)
+            msg += "\n"
+
+        if len(self.option_history) == 0:
+            msg += "For context, this is at the beginning of a task, before "\
+                "the robot has done anything.\n"
+        else:
+            # return f"For context, this is right after the robot has "\
+            # f"successfully executed its [{', '.join(self.option_history[-2:])}]"\
+            # f" option sequence."
+            # msg = f"For context, this state is right after the robot has "\
+            # f"successfully executed its {self.option_history[-1]} action."
+            msg += "For context, the state is right after the robot has"\
+                " successfully executed the action "\
+                f"{self.option_history[-1]}."
+            if CFG.nsp_pred_include_state_str_in_prompt:
+                if self.prev_state is not None:
+                    msg += " The object position and robot proprioception "\
+                        "before executing the action is:\n"
+                    msg += self.prev_state.dict_str(
+                        indent=2,
+                        object_features=False,
+                        use_object_id=True,
+                        position_proprio_features=True)
+                    msg += "\n"
+            if CFG.nsp_pred_include_prev_image_in_prompt:
+                msg += " The state before executing the action is depicted"\
+                    " by the image labeled with 'prev. state'."
+                msg += " Please carefully examine the images depicting the "\
+                    "'prev. state' and 'curr. state' before making a judgment."
+                msg += "\n"
+        msg += "The assertions to evaluate are:"
+        return msg
+
+    def add_bbox_features(self) -> None:
+        """Add the features about the bounding box to the objects."""
+        for obj, mask in self.obj_mask_dict.items():
+            bbox = mask_to_bbox(mask)
+            for name, value in bbox._asdict().items():
+                self.set(obj, f"bbox_{name}", value)
+
+    def set(self, obj: Object, feature_name: str, feature_val: Any) -> None:
+        """Set the value of an object feature by name."""
+        try:
+            idx = obj.type.feature_names.index(feature_name)
+        except:
+            breakpoint()
+        standard_feature_len = len(self.data[obj])
+        if idx >= standard_feature_len:
+            # When setting the bounding box features for the first time
+            # So we'd first append 4 dimension and try to set again
+            self.bbox_features[obj][idx - standard_feature_len] = feature_val
+        else:
+            self.data[obj][idx] = feature_val
+
+    def get(self, obj: Object, feature_name: str) -> Any:
+        idx = obj.type.feature_names.index(feature_name)
+        standard_feature_len = len(self.data[obj])
+        if idx >= standard_feature_len:
+            return self.bbox_features[obj][idx - standard_feature_len]
+        else:
+            return self.data[obj][idx]
+
+    def dict_str(
+            self,  # type: ignore[override]
+            indent: int = 0,
+            object_features: bool = True,
+            use_object_id: bool = False,
+            position_proprio_features: bool = False) -> str:
+        """Return a dictionary representation of the state."""
+        state_dict = {}
+        for obj in self:
+            obj_dict = {}
+            for attribute, value in zip(
+                    obj.type.feature_names,
+                    np.concatenate([self[obj], self.bbox_features[obj]])
+                    if self.bbox_features else self[obj]):
+                # include if it's proprioception feature, or position/bbox
+                # feature, or object_features is True
+                # if (obj.type.name == "robot" and \
+                #     attribute not in ["bbox_left", "bbox_right", "bbox_upper",
+                #         "pose_x", "pose_y", "pose_z", "pose_y_norm",
+                #                       "bbox_lower"]) or object_features:
+                #     #    attribute in ["pose_x", "pose_y", "pose_z", "bbox_left",
+                #     # "bbox_right", "bbox_upper", "bbox_lower"] or\
+                #     if isinstance(value, (float, int, np.float32)):
+                #         value = round(float(value), 1)
+                #     obj_dict[attribute] = value
+                if (position_proprio_features and attribute in [
+                        # "pose_x", "pose_y", "pose_z", "x", "y", "z",
+                        "rot",
+                        "fingers"
+                ]) or (object_features and attribute not in [
+                        "is_heavy",
+                        # "grasp",
+                        # "held",
+                        # "is_held",
+                ]):
+                    if isinstance(value, (float, int, np.float32)):
+                        value = round(float(value), 1)
+                    obj_dict[attribute] = value
+
+            if use_object_id: obj_name = obj.id_name
+            else: obj_name = obj.name
+            state_dict[f"{obj_name}:{obj.type.name}"] = obj_dict
+
+        # Create a string of n_space spaces
+        spaces = " " * indent
+
+        # Create a PrettyPrinter with a large width
+        dict_str = spaces + "{"
+        n_keys = len(state_dict.keys())
+        for i, (key, value) in enumerate(state_dict.items()):
+            value_str = ', '.join(f"'{k}': {v}" for k, v in value.items())
+            if value_str == "":
+                content_str = f"'{key}'"
+            else:
+                content_str = f"'{key}': {{{value_str}}}"
+            if i == 0:
+                dict_str += f"{content_str},\n"
+            elif i == n_keys - 1:
+                dict_str += spaces + f" {content_str}"
+            else:
+                dict_str += spaces + f" {content_str},\n"
+        dict_str += "}"
+        return dict_str
+
+    def __eq__(self, other: object) -> bool:
+        # Compare the data and simulator_state
+        assert isinstance(other, RawState)
+
+        if len(self.data) != len(other.data):
+            return False
+
+        for key, value in self.data.items():
+            if key not in other.data or not np.array_equal(
+                    value, other.data[key]):
+                return False
+
+        return self.simulator_state == other.simulator_state
+
+    def label_all_objects(self) -> None:
+        state_ip = ImagePatch(self)
+        # state_ip.cropped_image_in_PIL.save(f"images/obs_before_label_all.png")
+        # labels = [obj.id for obj in self.obj_mask_dict.keys()]
+        # masks = self.obj_mask_dict.values()
+        # state_ip.label_all_objects(masks, labels)
+        state_ip.label_all_objects(self.obj_mask_dict)
+        # state_ip.label_object(mask, obj.id)
+        # state_ip.cropped_image_in_PIL.save(f"images/obs_after_label_all.png")
+        self.labeled_image = state_ip.cropped_image_in_PIL
+
+    def copy(self) -> RawState:
+        pybullet_state_copy = super().copy()
+        # simulator_state_copy = list(self.joint_positions)
+        state_image_copy = copy.copy(self.state_image)
+        obj_mask_copy = copy.deepcopy(self.obj_mask_dict)
+        labeled_image_copy = copy.copy(self.labeled_image)
+        option_history_copy = copy.copy(self.option_history)
+        bbox_features_copy = copy.deepcopy(self.bbox_features)
+        prev_state_copy = self.prev_state.copy() if self.prev_state else None
+        return RawState(pybullet_state_copy.data,
+                        pybullet_state_copy.simulator_state, state_image_copy,
+                        obj_mask_copy, labeled_image_copy, option_history_copy,
+                        bbox_features_copy, prev_state_copy)
+
+    def get_obj_mask(self, object: Object) -> Mask:
+        """Return the mask for the object."""
+        return self.obj_mask_dict[object]
+
+    def get_obj_bbox(self, object: Object) -> BoundingBox:
+        """Get the bounding box of the object in the state image The origin is
+        bottom left corner--(0, 0)"""
+        mask = self.get_obj_mask(object)
+        return mask_to_bbox(mask)
+
+    def crop_to_objects(
+            self,
+            objects: Sequence[Object],
+            # left_margin: int = 15,
+            # lower_margin: int = 15,
+            # right_margin: int = 15,
+            # top_margin: int = 20
+            left_margin: int = 30,
+            lower_margin: int = 30,
+            right_margin: int = 30,
+            top_margin: int = 30) -> Tuple[BoundingBox, Sequence[Object]]:
+
+        bboxes = [self.get_obj_bbox(obj) for obj in objects]
+        bbox = smallest_bbox_from_bboxes(bboxes)
+        return (BoundingBox(
+            max(bbox.left - left_margin, 0), max(bbox.lower - lower_margin, 0),
+            min(bbox.right + right_margin, self.state_image.width),
+            min(bbox.upper + top_margin, self.state_image.height)), objects)
+
+        # state_ip = ImagePatch(self, attn_objects=objects)
+        # return state_ip.crop_to_objects(objects, left_margin, lower_margin,
+        #                                 right_margin, top_margin)
+
+
+@dataclass
+class VLMQuery:
+    """A class to represent a query to a VLM."""
+    query_str: str
+    attention_box: BoundingBox
+    attn_objects: Optional[List[Object]] = None
+    ground_atom: Optional[GroundAtom] = None
+
+
+def mask_to_bbox(mask: Mask) -> BoundingBox:
+    """Return the bounding box of the mask."""
+    y_indices, x_indices = np.where(mask)
+    height = mask.shape[0]
+
+    # Get the bounding box
+    try:
+        left = x_indices.min()
+        right = x_indices.max()
+        lower = height - (y_indices.max() + 1)
+        upper = height - (y_indices.min() + 1)
+    except ValueError:
+        left, lower, right, upper = 0, 0, 0, 0
+        # If the mask is empty, return a bounding box with all zeros
+
+    return BoundingBox(left, lower, right, upper)
+
+
+def smallest_bbox_from_bboxes(bboxes: Sequence[BoundingBox]) -> BoundingBox:
+    """Return the smallest bounding box that contains all the given
+    bounding."""
+
+    # Initialize the bounding box coordinates
+    left, lower, right, upper = np.inf, np.inf, -np.inf, -np.inf
+    # Iterate over all masks
+    for bbox in bboxes:
+        # Update the bounding box
+        left = min(left, bbox.left)
+        lower = min(lower, bbox.lower)
+        right = max(right, bbox.right)
+        upper = max(upper, bbox.upper)
+    return BoundingBox(left, lower, right, upper)
 
 
 class StateWithCache(State):
@@ -1135,12 +1495,26 @@ def run_policy(
                 start_time = time.perf_counter()
                 act = policy(state)
                 metrics["policy_call_time"] += time.perf_counter() - start_time
+            except Exception as e:
+                if not CFG.video_not_break_on_exception:
+                    if exceptions_to_break_on is not None and \
+                        type(e) in exceptions_to_break_on:
+                        if monitor_observed:
+                            exception_raised_in_step = True
+                        break
+                    raise e
+                if monitor is not None and not monitor_observed:
+                    monitor.observe(state, None)
+                    monitor_observed = True
+            else:
+                if monitor is not None and not monitor_observed:
+                    monitor.observe(state, act)
+                    monitor_observed = True
+
+            try:
                 # Note: it's important to call monitor.observe() before
                 # env.step(), because the monitor may use the environment's
                 # internal state.
-                if monitor is not None:
-                    monitor.observe(state, act)
-                    monitor_observed = True
                 state = env.step(act)
                 actions.append(act)
                 states.append(state)
@@ -1150,8 +1524,6 @@ def run_policy(
                     if monitor_observed:
                         exception_raised_in_step = True
                     break
-                if monitor is not None and not monitor_observed:
-                    monitor.observe(state, None)
                 raise e
             if termination_function(state):
                 break
@@ -1195,11 +1567,15 @@ def run_policy_with_simulator(
     actions: List[Action] = []
     exception_raised_in_step = False
     if not termination_function(state):
-        for _ in range(max_num_steps):
+        for i in range(max_num_steps):
+            if i % 15 == 0:
+                logging.debug(f"Step {i}")
+            # logging.debug(f"State: {state.pretty_str()}")
             monitor_observed = False
             exception_raised_in_step = False
             try:
                 act = policy(state)
+                # logging.debug(f"Action: {act}")
                 if monitor is not None:
                     monitor.observe(state, act)
                     monitor_observed = True
@@ -1207,6 +1583,7 @@ def run_policy_with_simulator(
                 actions.append(act)
                 states.append(state)
             except Exception as e:
+                logging.debug(f"Exception during running policy: {e}")
                 if exceptions_to_break_on is not None and \
                     type(e) in exceptions_to_break_on:
                     if monitor_observed:
@@ -1271,6 +1648,7 @@ def option_policy_to_policy(
     option_policy: Callable[[State], _Option],
     max_option_steps: Optional[int] = None,
     raise_error_on_repeated_state: bool = False,
+    abstract_function: Optional[Callable[[State], Set[GroundAtom]]] = None
 ) -> Callable[[State], Action]:
     """Create a policy that executes a policy over options."""
     cur_option = DummyOption
@@ -1296,9 +1674,31 @@ def option_policy_to_policy(
             raise OptionTimeoutFailure(
                 "Encountered repeated state.",
                 info={"last_failed_option": last_option})
+        # logging for debugging
+        # if last_state is not None:
+        #     cur_atoms = abstract_function(state)
+        #     prev_atoms = abstract_function(last_state)
+        #     logging.debug(f"Prev atoms: {sorted(prev_atoms)}")
+        #     logging.info(f"Add atoms: {sorted(cur_atoms-prev_atoms)} "
+        #                     f"Del atoms: {sorted(prev_atoms-cur_atoms)}")
+
+        # whether the noop option should terminate
+        wait_terminate = False
+        if CFG.wait_option_terminate_on_atom_change and cur_option.name == "Wait":
+            assert abstract_function is not None
+            assert last_state is not None
+            cur_atoms = abstract_function(state)
+            prev_atoms = abstract_function(last_state)
+            if cur_atoms != prev_atoms:
+                # logging.debug(f"Prev atoms: {sorted(prev_atoms)}")
+                # logging.info(f"Add atoms: {sorted(cur_atoms-prev_atoms)} "
+                #               f"Del atoms: {sorted(prev_atoms-cur_atoms)}")
+                wait_terminate = True
+
         last_state = state
 
-        if cur_option is DummyOption or cur_option.terminal(state):
+        if wait_terminate or cur_option is DummyOption or cur_option.terminal(
+                state):
             try:
                 cur_option = option_policy(state)
             except OptionExecutionFailure as e:
@@ -1318,9 +1718,10 @@ def option_policy_to_policy(
 
 
 def option_plan_to_policy(
-        plan: Sequence[_Option],
-        max_option_steps: Optional[int] = None,
-        raise_error_on_repeated_state: bool = False
+    plan: Sequence[_Option],
+    max_option_steps: Optional[int] = None,
+    raise_error_on_repeated_state: bool = False,
+    abstract_function: Optional[Callable[[State], Set[GroundAtom]]] = None
 ) -> Callable[[State], Action]:
     """Create a policy that executes a sequence of options in order."""
     queue = list(plan)  # don't modify plan, just in case
@@ -1329,12 +1730,15 @@ def option_plan_to_policy(
         del state  # not used
         if not queue:
             raise OptionExecutionFailure("Option plan exhausted!")
-        return queue.pop(0)
+        option = queue.pop(0)
+        logging.debug(f"Executing option {option.simple_str()}")
+        return option
 
     return option_policy_to_policy(
         _option_policy,
         max_option_steps=max_option_steps,
-        raise_error_on_repeated_state=raise_error_on_repeated_state)
+        raise_error_on_repeated_state=raise_error_on_repeated_state,
+        abstract_function=abstract_function)
 
 
 def nsrt_plan_to_greedy_option_policy(
@@ -1378,7 +1782,8 @@ def nsrt_plan_to_greedy_policy(
     nsrt_plan: Sequence[_GroundNSRT],
     goal: Set[GroundAtom],
     rng: np.random.Generator,
-    necessary_atoms_seq: Optional[Sequence[Set[GroundAtom]]] = None
+    necessary_atoms_seq: Optional[Sequence[Set[GroundAtom]]] = None,
+    abstract_function: Optional[Callable[[State], Set[GroundAtom]]] = None
 ) -> Callable[[State], Action]:
     """Greedily execute an NSRT plan, assuming downward refinability and that
     any sample will work.
@@ -1388,7 +1793,60 @@ def nsrt_plan_to_greedy_policy(
     """
     option_policy = nsrt_plan_to_greedy_option_policy(
         nsrt_plan, goal, rng, necessary_atoms_seq=necessary_atoms_seq)
-    return option_policy_to_policy(option_policy)
+    return option_policy_to_policy(option_policy,
+                                   abstract_function=abstract_function)
+
+
+def process_plan_to_greedy_option_policy(
+    process_plan: Sequence[_GroundEndogenousProcess],
+    goal: Set[GroundAtom],
+    rng: np.random.Generator,
+    necessary_atoms_seq: Optional[Sequence[Set[GroundAtom]]] = None,
+) -> Callable[[State], _Option]:
+    """Greedily execute a process plan, assuming downward refinability and that
+    any sample will work.
+
+    If an option is not initiable or if the plan runs out, an
+    OptionExecutionFailure is raised.
+    """
+    cur_process: Optional[_GroundEndogenousProcess] = None
+    process_queue = list(process_plan)
+    if necessary_atoms_seq is None:
+        empty_atoms: Set[GroundAtom] = set()
+        necessary_atoms_seq = [
+            empty_atoms for _ in range(len(process_plan) + 1)
+        ]
+    assert len(necessary_atoms_seq) == len(process_plan) + 1
+    necessary_atoms_queue = list(necessary_atoms_seq)
+
+    def _option_policy(state: State) -> _Option:
+        nonlocal cur_process
+        if not process_queue:
+            raise OptionExecutionFailure("Process plan exhausted.")
+        expected_atoms = necessary_atoms_queue.pop(0)
+        if not all(a.holds(state) for a in expected_atoms):
+            raise OptionExecutionFailure(
+                "Executing the process failed to achieve the necessary atoms.")
+        cur_process = process_queue.pop(0)
+        cur_option = cur_process.sample_option(state, goal, rng)
+        logging.debug(f"Using option {cur_option.name}{cur_option.objects}"
+                      f"{cur_option.params} from process plan.")
+        return cur_option
+
+    return _option_policy
+
+
+def process_plan_to_greedy_policy(
+    process_plan: Sequence[_GroundEndogenousProcess],
+    goal: Set[GroundAtom],
+    rng: np.random.Generator,
+    necessary_atoms_seq: Optional[Sequence[Set[GroundAtom]]] = None,
+    abstract_function: Optional[Callable[[State], Set[GroundAtom]]] = None
+) -> Callable[[State], Action]:
+    option_policy = process_plan_to_greedy_option_policy(
+        process_plan, goal, rng, necessary_atoms_seq=necessary_atoms_seq)
+    return option_policy_to_policy(option_policy,
+                                   abstract_function=abstract_function)
 
 
 def sample_applicable_option(param_options: List[ParameterizedOption],
@@ -1444,7 +1902,7 @@ def sample_applicable_ground_nsrt(
     if len(applicable_nsrts) == 0:
         return None
     idx = rng.choice(len(applicable_nsrts))
-    return applicable_nsrts[idx]
+    return applicable_nsrts[idx]  # type: ignore[return-value]
 
 
 def action_arrs_to_policy(
@@ -1803,18 +2261,25 @@ def run_hill_climbing(
     heuristic: Callable[[_S], float],
     early_termination_heuristic_thresh: Optional[float] = None,
     enforced_depth: int = 0,
+    exhaustive_lookahead: bool = False,
     parallelize: bool = False,
     verbose: bool = True,
     timeout: float = float('inf')
 ) -> Tuple[List[_S], List[_A], List[float]]:
     """Enforced hill climbing local search.
 
-    For each node, the best child node is always selected, if that child is
+    For each node, this search looks for an improvement up to `enforced_depth`.
+    If `exhaustive_lookahead` is False (default), for each node, the best child
+    node is always selected, if that child is
     an improvement over the node. If no children improve on the node, look
     at the children's children, etc., up to enforced_depth, where enforced_depth
     0 corresponds to simple hill climbing. Terminate when no improvement can
     be found. early_termination_heuristic_thresh allows for searching until
     heuristic reaches a specified value.
+    Let b be the branching factor, d be the enforced_depth, this has time
+    complxity of O(b^{d+1}).
+    If True, it searches the entire horizon up to the
+    enforced depth and picks the best overall improvement.
 
     Lower heuristic is better.
     """
@@ -1823,12 +2288,13 @@ def run_hill_climbing(
         initial_state, 0, 0)
     last_heuristic = heuristic(cur_node.state)
     heuristics = [last_heuristic]
-    visited = {initial_state}
+    # visited = {initial_state} # <--- deleted for exhaustive_lookahead
     if verbose:
         logging.info(f"\n\nStarting hill climbing at state {cur_node.state} "
                      f"with heuristic {last_heuristic}")
     start_time = time.perf_counter()
     while True:
+        visited = {cur_node.state}  # <--- added for exhaustive_lookahead
 
         # Stops when heuristic reaches specified value.
         if early_termination_heuristic_thresh is not None \
@@ -1882,15 +2348,27 @@ def run_hill_climbing(
                             best_heuristic = child_heuristic
                             best_child_node = child_node
             all_best_heuristics.append(best_heuristic)
-            if last_heuristic > best_heuristic:
+
+            if not exhaustive_lookahead and last_heuristic > best_heuristic:
                 # Some improvement found.
                 if verbose:
                     logging.info(f"Found an improvement at depth {depth}")
                 break
             # Continue on to the next depth.
             current_depth_nodes = successors_at_depth
+            if not current_depth_nodes:
+                if verbose:
+                    logging.info(
+                        f"No more successors to explore at depth {depth}.")
+                break  # No need to search deeper if there are no more nodes.
+
             if verbose:
-                logging.info(f"No improvement found at depth {depth}")
+                if exhaustive_lookahead:
+                    logging.info(f"Finished depth {depth}. "
+                                 f"Best heuristic so far: {best_heuristic}")
+                elif last_heuristic <= best_heuristic:
+                    logging.info(f"No improvement found at depth {depth}")
+
         if best_child_node is None:
             if verbose:
                 logging.info("\nTerminating hill climbing, no more successors")
@@ -1906,9 +2384,13 @@ def run_hill_climbing(
         if verbose:
             logging.info(f"\nHill climbing reached new state {cur_node.state} "
                          f"with heuristic {last_heuristic}")
+
     states, actions = _finish_plan(cur_node)
-    assert len(states) == len(heuristics)
-    return states, actions, heuristics
+    # The number of heuristics might not match the plan length perfectly now,
+    # so we should regenerate them from the final plan.
+    final_heuristics = [heuristic(s) for s in states]
+    assert len(states) == len(final_heuristics)
+    return states, actions, final_heuristics
 
 
 def run_policy_guided_astar(
@@ -2224,23 +2706,36 @@ def create_vlm_predicate(
             objects: Sequence[Object]) -> bool:  # pragma: no cover.
         raise Exception("VLM predicate classifier should never be called!")
 
-    return VLMPredicate(name, types, _stripped_classifier, get_vlm_query_str)
+    return VLMPredicate(name, types, _stripped_classifier,
+                        get_vlm_query_str)  # type: ignore[arg-type]
 
 
 def create_llm_by_name(
         model_name: str) -> LargeLanguageModel:  # pragma: no cover
     """Create particular llm using a provided name."""
-    if "gemini" in model_name:
+    if CFG.pretrained_model_service_provider == "openai":
+        return OpenAILLM(model_name)
+    elif CFG.pretrained_model_service_provider == "google":
         return GoogleGeminiLLM(model_name)
-    return OpenAILLM(model_name)
+    elif CFG.pretrained_model_service_provider == "openrouter":
+        return OpenRouterLLM(model_name)
+    else:
+        raise ValueError(f"Unknown pretrained model service provider: "
+                         f"{CFG.pretrained_model_service_provider}")
 
 
 def create_vlm_by_name(
         model_name: str) -> VisionLanguageModel:  # pragma: no cover
     """Create particular vlm using a provided name."""
-    if "gemini" in model_name:
+    if CFG.pretrained_model_service_provider == "openai":
+        return OpenAIVLM(model_name)
+    elif CFG.pretrained_model_service_provider == "google":
         return GoogleGeminiVLM(model_name)
-    return OpenAIVLM(model_name)
+    elif CFG.pretrained_model_service_provider == "openrouter":
+        return OpenRouterVLM(model_name)
+    else:
+        raise ValueError(f"Unknown pretrained model service provider: "
+                         f"{CFG.pretrained_model_service_provider}")
 
 
 def parse_model_output_into_option_plan(
@@ -2273,11 +2768,15 @@ def parse_model_output_into_option_plan(
             continue
         if option_name not in option_name_to_option.keys() or \
             "(" not in option_str:
-            logging.info(
-                f"Line {option_str} output by model doesn't "
-                "contain a valid option name. Terminating option plan "
-                "parsing.")
-            break
+            if option_plan:
+                # Already found some options; stop on first non-option line.
+                logging.info(
+                    f"Line {option_str} output by model doesn't "
+                    "contain a valid option name. Terminating option plan "
+                    "parsing.")
+                break
+            # Skip preamble lines (analysis text before the plan starts).
+            continue
         if parse_continuous_params and "[" not in option_str:
             logging.info(
                 f"Line {option_str} output by model doesn't contain a "
@@ -2473,8 +2972,11 @@ def query_vlm_for_atom_vals(
     # Query VLM.
     if vlm is None:
         vlm = create_vlm_by_name(CFG.vlm_model_name)  # pragma: no cover.
-    vlm_input_imgs = \
-        [PIL.Image.fromarray(img_arr) for img_arr in imgs] # type: ignore
+    if CFG.env in ["pybullet_coffee"]:
+        vlm_input_imgs = list(imgs)  # type: ignore
+    else:
+        vlm_input_imgs = \
+            [PIL.Image.fromarray(img_arr) for img_arr in imgs] # type: ignore
     vlm_output = vlm.sample_completions(vlm_query_str,
                                         vlm_input_imgs,
                                         0.0,
@@ -2510,9 +3012,16 @@ def abstract(state: State,
     """
     # Start by pulling out all VLM predicates.
     vlm_preds = set(pred for pred in preds if isinstance(pred, VLMPredicate))
+    derived_preds, primitive_preds = set(), set()
+    for pred in preds:
+        if isinstance(pred, DerivedPredicate):
+            derived_preds.add(pred)
+        else:
+            primitive_preds.add(pred)
+
     # Next, classify all non-VLM predicates.
     atoms = set()
-    for pred in preds:
+    for pred in primitive_preds:
         if pred not in vlm_preds:
             for choice in get_object_combinations(list(state), pred.types):
                 if pred.holds(state, choice):
@@ -2526,6 +3035,20 @@ def abstract(state: State,
                 vlm_atoms.add(GroundAtom(pred, choice))
         true_vlm_atoms = query_vlm_for_atom_vals(vlm_atoms, state, vlm)
         atoms |= true_vlm_atoms
+
+    # Evaluate derived predicates.
+    if len(derived_preds) > 0:
+        try:
+            atoms |= abstract_with_derived_predicates(atoms, derived_preds,
+                                                      list(state))
+        except PredicateEvaluationError as e:
+            raise e
+            # buggy_pred = e.pred
+            # # logging.debug(f"preds before {buggy_pred} is removed: {preds}")
+            # cnpt_preds.remove(buggy_pred)
+            # # logging.debug(f"preds after {buggy_pred} is removed: {preds}")
+            # return abstract(state, prim_preds | cnpt_preds, vlm,
+            #                 return_valid_preds)
     return atoms
 
 
@@ -2561,12 +3084,17 @@ def all_ground_operators_given_partial(
         yield ground_op
 
 
-def all_ground_nsrts(nsrt: NSRT,
+def all_ground_nsrts(nsrt: Union[NSRT, CausalProcess],
                      objects: Collection[Object]) -> Iterator[_GroundNSRT]:
     """Get all possible groundings of the given NSRT with the given objects."""
     types = [p.type for p in nsrt.parameters]
     for choice in get_object_combinations(objects, types):
-        yield nsrt.ground(tuple(choice))
+        # only return if there are no repeated arguments
+        if CFG.no_repeated_arguments_in_grounding:
+            if len(choice) == len(set(choice)):
+                yield nsrt.ground(tuple(choice))  # type: ignore[misc]
+        else:
+            yield nsrt.ground(tuple(choice))  # type: ignore[misc]
 
 
 def all_ground_nsrts_fd_translator(
@@ -2865,6 +3393,24 @@ def create_ground_atom_dataset(
     return ground_atom_dataset
 
 
+def create_ground_atom_option_dataset(
+        trajectories: List[LowLevelTrajectory],
+        predicates: Set[Predicate]) -> List[AtomOptionTrajectory]:
+    """Apply all predicates to all trajectories in the dataset and also
+    annotate with options (HLA)."""
+    ground_atom_option_dataset = []
+    for traj in trajectories:
+        # TODO: this is current just based on the current states. We would
+        # probably want to extend this to state history.
+        atoms = [abstract(s, predicates) for s in traj.states]
+        options = [a.get_option() for a in traj.actions]
+        ground_atom_option_dataset.append(
+            AtomOptionTrajectory(
+                traj.states, atoms, options, traj.is_demo,
+                traj.train_task_idx if traj.is_demo else None))
+    return ground_atom_option_dataset
+
+
 def prune_ground_atom_dataset(
         ground_atom_dataset: List[GroundAtomTrajectory],
         kept_predicates: Collection[Predicate]) -> List[GroundAtomTrajectory]:
@@ -3017,14 +3563,21 @@ def get_reachable_atoms(ground_ops: Collection[GroundNSRTOrSTRIPSOperator],
 
 
 def get_applicable_operators(
-        ground_ops: Collection[GroundNSRTOrSTRIPSOperator],
-        atoms: Collection[GroundAtom]) -> Iterator[GroundNSRTOrSTRIPSOperator]:
+    ground_ops: Collection[Union[GroundNSRTOrSTRIPSOperator,
+                                 _GroundEndogenousProcess]],
+    atoms: Collection[GroundAtom]
+) -> Iterator[Union[GroundNSRTOrSTRIPSOperator, _GroundEndogenousProcess]]:
     """Iterate over ground operators whose preconditions are satisfied.
 
     Note: the order may be nondeterministic. Users should be invariant.
     """
     for op in ground_ops:
-        applicable = op.preconditions.issubset(atoms)
+        if isinstance(op, _GroundNSRT) or isinstance(op,
+                                                     _GroundSTRIPSOperator):
+            applicable = op.preconditions.issubset(atoms)
+        elif isinstance(op, _GroundEndogenousProcess):
+            applicable = op.condition_at_start.issubset(atoms)
+
         if applicable:
             yield op
 
@@ -3070,7 +3623,7 @@ def get_successors_from_ground_ops(
     """
     seen_successors = set()
     for ground_op in get_applicable_operators(ground_ops, atoms):
-        next_atoms = apply_operator(ground_op, atoms)
+        next_atoms = apply_operator(ground_op, atoms)  # type: ignore[type-var]
         if unique:
             frozen_next_atoms = frozenset(next_atoms)
             if frozen_next_atoms in seen_successors:
@@ -3461,14 +4014,21 @@ def create_video_from_partial_refinements(
         _, plan = max(partial_refinements, key=lambda x: len(x[1]))
         policy = option_plan_to_policy(plan)
         video: Video = []
+        logging.debug("reset env for create video")
         state = env.reset(train_or_test, task_idx)
-        for _ in range(max_num_steps):
+        # logging.debug(f"{pformat(state.pretty_str())}")
+        for i in range(max_num_steps):
+            # logging.debug(f"state: {state.pretty_str()}")
             try:
                 act = policy(state)
+                # logging.debug(f"act: {act}")
             except OptionExecutionFailure:
                 video.extend(env.render())
-                break
-            video.extend(env.render(act))
+                if not CFG.video_not_break_on_exception:
+                    break
+            else:
+                video.extend(env.render(act))
+            # logging.debug("Finished rendering.")
             try:
                 state = env.step(act)
             except EnvironmentFailure:
@@ -3493,21 +4053,36 @@ def save_video(outfile: str, video: Video) -> None:
     outdir = CFG.video_dir
     os.makedirs(outdir, exist_ok=True)
     outpath = os.path.join(outdir, outfile)
-    imageio.mimwrite(outpath, video, fps=CFG.video_fps)  # type: ignore
+    video_uint8 = [np.array(frame).astype(np.uint8) for frame in video]
+    imageio.mimwrite(outpath, video_uint8, fps=CFG.video_fps)  # type: ignore
     logging.info(f"Wrote out to {outpath}")
+
+
+def save_images_parallel(outfile_prefix: str, video: Video) -> None:
+    """Save the video as individual images in parallel."""
+    outdir = CFG.image_dir
+    outdir = os.path.join(outdir, os.path.dirname(outfile_prefix))
+    outfile_prefix = os.path.basename(outfile_prefix)
+
+    os.makedirs(outdir, exist_ok=True)
+    width = len(str(len(video)))
+
+    def _write_frame(i: int, image: Any) -> None:
+        image_number = str(i).zfill(width)
+        outfile = outfile_prefix + f"_image_{image_number}.png"
+        outpath = os.path.join(outdir, outfile)
+        image_array = np.array(image)
+        imageio.imwrite(outpath, image_array.astype(np.uint8))
+        logging.info(f"Wrote out to {outpath}")
+
+    with ThreadPoolExecutor() as executor:
+        for i, frame in enumerate(video):
+            executor.submit(_write_frame, i, frame)
 
 
 def save_images(outfile_prefix: str, video: Video) -> None:
     """Save the video as individual images to image_dir."""
-    outdir = CFG.image_dir
-    os.makedirs(outdir, exist_ok=True)
-    width = len(str(len(video)))
-    for i, image in enumerate(video):
-        image_number = str(i).zfill(width)
-        outfile = outfile_prefix + f"_image_{image_number}.png"
-        outpath = os.path.join(outdir, outfile)
-        imageio.imwrite(outpath, image)
-        logging.info(f"Wrote out to {outpath}")
+    return save_images_parallel(outfile_prefix, video)
 
 
 def get_env_asset_path(asset_name: str, assert_exists: bool = True) -> str:
@@ -3628,8 +4203,13 @@ def get_config_path_str(experiment_id: Optional[str] = None) -> str:
     """
     if experiment_id is None:
         experiment_id = CFG.experiment_id
-    return (f"{CFG.env}__{CFG.approach}__{CFG.seed}__{CFG.excluded_predicates}"
-            f"__{CFG.included_options}__{experiment_id}")
+    if CFG.use_counterfactual_dataset_path_name:
+        return (f"{CFG.env}__{CFG.seed}__{CFG.experiment_id}__query")
+    else:
+        return (
+            f"{CFG.env}__{CFG.approach}__{CFG.seed}__"
+            f"{CFG.excluded_predicates}__{CFG.included_options}__{experiment_id}"
+        )
 
 
 def get_approach_save_path_str() -> str:
@@ -3767,6 +4347,187 @@ def null_sampler(state: State, goal: Set[GroundAtom], rng: np.random.Generator,
     """A sampler for an NSRT with no continuous parameters."""
     del state, goal, rng, objs  # unused
     return np.array([], dtype=np.float32)  # no continuous parameters
+
+
+class ConstantDelay(DelayDistribution):
+
+    def __init__(self, delay: Union[int, float, torch.Tensor]):
+        # keep dtype consistent with the rest of the model
+        self.delay = torch.as_tensor(delay, dtype=torch.get_default_dtype())
+        # reusable – matches self.delay’s dtype/device
+        self._neg_inf = torch.tensor(float("-inf"),
+                                     dtype=self.delay.dtype,
+                                     device=self.delay.device)
+
+    def copy(self) -> ConstantDelay:
+        """Return a copy of this distribution."""
+        return ConstantDelay(self.delay.clone())
+
+    def sample(self) -> int:
+        return int(self.delay.item())
+
+    def set_parameters(self, parameters: Sequence[torch.Tensor],
+                       **kwargs: Any) -> None:
+        self.delay = parameters[0]
+        # Invalidate cached properties
+        self.__dict__.pop("_str", None)
+        self.__dict__.pop("_hash", None)
+
+    def get_parameters(self) -> Sequence[float]:
+        """Return the parameters of the distribution."""
+        return [self.delay.item()]
+
+    def probability(self, k: int) -> float:
+        return 1.0 if k == int(self.delay.item()) else 0.0
+
+    def log_prob(self, k: Union[int, torch.Tensor]) -> torch.Tensor:
+        """Vectorised log-prob; differentiable w.r.t.
+
+        self.delay.
+        """
+        if not isinstance(k, torch.Tensor):
+            k_tensor = torch.tensor(k,
+                                    dtype=torch.long,
+                                    device=self.delay.device)
+        else:
+            k_tensor = k.long().to(self.delay.device)
+
+        zeros = torch.zeros_like(k_tensor, dtype=torch.get_default_dtype())
+        neg_inf = torch.full_like(k_tensor,
+                                  float("-inf"),
+                                  dtype=torch.get_default_dtype())
+        return torch.where(k_tensor == self.delay.long(), zeros, neg_inf)
+
+    @cached_property
+    def _str(self) -> str:
+        return f"ConstantDelay({self.delay:.4f})"
+
+
+class DiscreteGaussianDelay(DelayDistribution):
+    r"""Truncated discrete Gaussian distribution  (a.k.a. Discrete Normal).
+
+    Parameters
+    ----------
+    mu : float or Tensor
+        Location parameter (can be any real number).
+    sigma : float or Tensor
+        Scale (> 0).  Smaller values → tighter mass around ``mu``.
+    max_k : int, optional
+        Build / cache the PMF on the support  k = 0 … max_k-1  (default 300).
+    """
+
+    def __init__(self,
+                 mu: torch.Tensor,
+                 sigma: torch.Tensor,
+                 max_k: int = 300) -> None:
+        if not torch.all(sigma > 0):
+            raise ValueError("Initial sigma must be positive.")
+
+        self.log_mu = torch.log(mu)
+        self.log_sigma = torch.log(sigma)
+        self._max_k = max_k
+        self._update_cache()
+
+    def copy(self) -> DiscreteGaussianDelay:
+        """Return a copy of this distribution."""
+        return DiscreteGaussianDelay(self.mu.clone(), self.sigma.clone(),
+                                     self._max_k)
+
+    @property
+    def sigma(self) -> torch.Tensor:
+        """The actual standard deviation, derived from the optimized
+        log_sigma."""
+        return torch.exp(self.log_sigma)
+
+    @property
+    def mu(self) -> torch.Tensor:
+        """The mean of the discrete Gaussian."""
+        return torch.exp(self.log_mu)
+
+    # ------------------------------------------------------------------ #
+    # Internals
+    # ------------------------------------------------------------------ #
+    def _update_cache(self) -> None:
+        """Rebuild cached log-PMF / PMF / CDF using safe numerics."""
+        EPS = 1e-8
+
+        mu = self.mu
+        sigma_val = self.sigma
+        sigma = torch.clamp(sigma_val, min=EPS)  # ensure positivity
+        if not torch.all(sigma > 0):
+            raise ValueError("Initial sigma must be positive.")
+
+        assert isinstance(self._max_k, int)
+        ks = torch.arange(self._max_k, dtype=mu.dtype,
+                          device=mu.device)  # k = 0 … max_k-1
+
+        # Unnormalised log-probability of a discrete Gaussian
+        #   p̃(k) = exp( −(k−μ)² / (2σ²) )
+        # Work in log-space for stability:
+        log_p_unnorm = -0.5 * ((ks - mu)**2) / (sigma**2)
+
+        # Remove any accidental NaNs / ±Inf
+        log_p_unnorm = torch.nan_to_num(log_p_unnorm,
+                                        nan=-torch.inf,
+                                        posinf=-torch.inf,
+                                        neginf=-torch.inf)
+
+        # Normalise on the bounded support 0 … max_k-1
+        log_norm = torch.logsumexp(log_p_unnorm, dim=0)
+        self._log_pmf = log_p_unnorm - log_norm
+
+        self._pmf = self._log_pmf.exp()
+        self._cdf = torch.cumsum(self._pmf, dim=0)
+
+    # ------------------------------------------------------------------ #
+    # Public interface (identical to DoublePoissonDelay)
+    # ------------------------------------------------------------------ #
+    def set_parameters(self, parameters: Sequence[torch.Tensor],
+                       **kwargs: Any) -> None:
+        self.log_mu, self.log_sigma = parameters
+        if "max_k" in kwargs and kwargs["max_k"] is not None:
+            self._max_k = kwargs["max_k"]
+        self._update_cache()
+        # Invalidate cached repr/hash if present
+        self.__dict__.pop('_str', None)
+        self.__dict__.pop('_hash', None)
+
+    def get_parameters(self) -> Sequence[float]:
+        """Return the parameters of the distribution."""
+        return [self.mu.item(), self.sigma.item()]
+
+    def probability(self, k: int) -> float:
+        if 0 <= k < self._max_k:
+            return float(self._pmf[k])
+        return 0.0
+
+    def log_prob(self, k: Union[int, torch.Tensor]) -> torch.Tensor:
+        if not isinstance(k, torch.Tensor):
+            k_tensor = torch.tensor(k, dtype=torch.long)
+        else:
+            k_tensor = k.long()
+
+        k_flat = k_tensor.flatten()
+        log_probs_flat = torch.full_like(k_flat,
+                                         float('-inf'),
+                                         dtype=self._log_pmf.dtype)
+
+        mask = (k_flat >= 0) & (k_flat < self._max_k)
+        if mask.any():
+            log_probs_flat[mask] = self._log_pmf[k_flat[mask]]
+
+        return log_probs_flat.reshape(k_tensor.shape)
+
+    def sample(self, sample_mode: bool = True) -> int:
+        if sample_mode:
+            return int(self.mu.item())
+        else:
+            u = torch.rand(1).item()
+            return int(torch.searchsorted(self._cdf, torch.tensor(u)))
+
+    @cached_property
+    def _str(self) -> str:
+        return f"DiscreteGaussianDelay({self.mu:.4f}, {self.sigma:.4f})"
 
 
 @functools.lru_cache(maxsize=None)
@@ -4085,3 +4846,314 @@ def add_text_to_draw_img(
     # Add the text to the image
     draw.text(position, text, fill="red", font=font)
     return draw
+
+
+def wrap_angle(angle: float) -> float:
+    """Wrap an angle in radians to [-pi, pi]."""
+    return np.arctan2(np.sin(angle), np.cos(angle))
+
+
+def get_parameterized_option_by_name(
+        options: Set[ParameterizedOption],
+        option_name: str) -> Optional[ParameterizedOption]:
+    """Retrieve an option by its name from a set of options."""
+    return next((option for option in options if option.name == option_name),
+                None)
+
+
+def get_object_by_name(objects: Collection[Object],
+                       name: str) -> Optional[Object]:
+    """Get an object by its name from a collection of objects.
+
+    Args:
+        objects: Collection of objects to search through
+        name: Name of the object to find
+
+    Returns:
+        The object if found, None otherwise
+    """
+    return next((obj for obj in objects if obj.name == name), None)
+
+
+def configure_logging() -> None:
+    # Create a single formatter instance to be reused
+    colored_formatter = colorlog.ColoredFormatter(
+        '%(log_color)s%(levelname)s: %(message)s',
+        log_colors={
+            'DEBUG': 'cyan',
+            'INFO': 'green',
+            'WARNING': 'yellow',
+            'ERROR': 'red',
+            'CRITICAL': 'red,bg_white',
+        },
+        reset=True,
+        style='%')
+    # Log to stderr.
+    colorlog_handler = colorlog.StreamHandler()
+    colorlog_handler.setFormatter(colored_formatter)
+    handlers: List[logging.Handler] = [colorlog_handler]
+    if CFG.log_file:
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        CFG.log_file += (f"{CFG.approach}/{CFG.experiment_id}/"
+                         f"seed{CFG.seed}/run_{timestamp}/")
+        os.makedirs(CFG.log_file, exist_ok=True)
+
+        # Handler for DEBUG level messages
+        debug_handler = logging.FileHandler(os.path.join(
+            CFG.log_file, "debug.log"),
+                                            mode='w')
+        debug_handler.setLevel(logging.DEBUG)
+        debug_handler.setFormatter(colored_formatter)
+        handlers.append(debug_handler)
+
+        # Handler for INFO level messages
+        info_handler = logging.FileHandler(os.path.join(
+            CFG.log_file, "info.log"),
+                                           mode='w')
+        info_handler.setLevel(logging.INFO)
+        info_handler.setFormatter(colored_formatter)
+        handlers.append(info_handler)
+
+    logging.basicConfig(level=CFG.loglevel,
+                        format="%(message)s",
+                        handlers=handlers,
+                        force=True)
+    logging.getLogger('matplotlib.font_manager').setLevel(logging.ERROR)
+    logging.getLogger('libpng').setLevel(logging.ERROR)
+    logging.getLogger('PIL').setLevel(logging.ERROR)
+    logging.getLogger('openai').setLevel(logging.INFO)
+    # Used by openai package
+    logging.getLogger("httpx").setLevel(logging.INFO)
+    logging.getLogger("httpcore").setLevel(logging.INFO)
+
+
+def log_initial_info(str_args: str) -> None:
+    """Log initial configuration and setup information."""
+    if CFG.log_file:
+        logging.info(f"Logging to {CFG.log_file}")
+    logging.info(f"Running command: python {str_args}")
+    logging.info("Full config:")
+    logging.info(CFG)
+    logging.info(f"Git commit hash: {get_git_commit_hash()}")
+
+
+def add_label_to_video(video: Video,
+                       prefix: str,
+                       imgs_dir: str,
+                       save: bool = True) -> Video:
+    """Add a label to each frame of the video and save the images."""
+    os.makedirs(imgs_dir, exist_ok=True)
+    new_video: Video = []
+    for i, img in enumerate(video):
+        img_name = prefix + f"frame_{i+1}"
+        labeled_img = add_label_to_image(img, img_name, imgs_dir,
+                                         save=save)  # type: ignore[arg-type]
+        new_video.append(labeled_img)  # type: ignore[arg-type]
+    return new_video
+
+
+def add_label_to_image(img: PIL.Image.Image,
+                       s_name: str,
+                       obs_dir: str,
+                       f_suffix: str = ".png",
+                       save: bool = True) -> PIL.Image.Image:
+    """Add a label to an image and potentially save."""
+    img_copy = img.copy()
+    draw = ImageDraw.Draw(img_copy)
+    font = ImageFont.load_default().font_variant(
+        size=50)  # type: ignore[union-attr]
+
+    # Get text dimensions
+    bbox = draw.textbbox((0, 0), s_name, font=font)
+    text_width = bbox[2] - bbox[0]
+    text_height = bbox[3] - bbox[1]
+
+    # Calculate position (bottom right with padding)
+    padding = 10
+    x = img_copy.width - text_width - padding
+    y = img_copy.height - text_height - 2 * padding
+
+    text_color = (0, 0, 0)  # black
+    draw.text((x, y), s_name, fill=text_color, font=font)
+
+    if save:
+        os.makedirs(obs_dir, exist_ok=True)
+        img_copy.save(os.path.join(obs_dir, s_name + f_suffix))
+        logging.debug(f"Saved Image {s_name}")
+    return img_copy
+
+
+def load_all_images_from_dir(dir_path: str) -> List[PIL.Image.Image]:
+    """Load all images from a directory."""
+    images = []
+    img_paths = sorted(os.listdir(dir_path))
+    for file in img_paths:
+        if file.endswith(('.png', '.jpg')):
+            images.append(PIL.Image.open(os.path.join(dir_path, file)))
+    return images
+
+
+def all_subsets(input_set: Iterable[Any]) -> Iterator[Set[Any]]:
+    """Generates all subsets of a given set.
+
+    Args:
+        input_set: An iterable (e.g., a list, set, tuple)
+                   from which to generate subsets.
+
+    Yields:
+        tuple: Each subset as a tuple.
+    """
+    s = list(input_set)  # Convert to list to handle various iterable inputs
+    n = len(s)
+    for i in range(n + 1):  # Iterate from subset size 0 up to n
+        for subset in itertools.combinations(s, i):
+            yield set(subset)
+
+
+def add_in_auxiliary_predicates(predicates: Set[Predicate]) -> Set[Predicate]:
+    # If a predicate is a drived predicate, check its auxiliary predicates
+    # attribute, and add them and all their derived predicates to the set
+    # recursively.
+    def add_auxiliary(pred: Predicate, preds: Set[Predicate]) -> None:
+        if isinstance(pred, DerivedPredicate):
+            if pred.auxiliary_predicates:
+                preds.update(pred.auxiliary_predicates)
+                for aux_pred in pred.auxiliary_predicates:
+                    add_auxiliary(aux_pred, preds)
+
+    new_preds = predicates.copy()
+    for pred in predicates:
+        add_auxiliary(pred, new_preds)
+    return new_preds
+
+
+def get_derived_predicates(
+        predicates: Set[Predicate]) -> Set[DerivedPredicate]:
+    """Get all derived predicates from a set of predicates."""
+    return {pred for pred in predicates if isinstance(pred, DerivedPredicate)}
+
+
+# def abstract_with_derived_predicates(atoms, derived_preds, objects):
+#     """Compute all derived atoms via layered evaluation (fewer passes).
+#        Potentially faster than the current implementation."""
+#     # Build dependency graph over derived preds
+#     is_derived = {p for p in derived_preds}
+#     indeg = {p: 0 for p in derived_preds}
+#     edges = {p: set() for p in derived_preds}
+#     for p in derived_preds:
+#         for aux in getattr(p, "auxiliary_predicates", []):
+#             # only count deps on other derived preds
+#             q = next((dp for dp in derived_preds if dp.name == aux.name), None)
+#             if q:
+#                 edges[q].add(p); indeg[p] += 1
+
+#     # Kahn’s algorithm => layers
+#     frontier = [p for p in derived_preds if indeg[p] == 0]
+#     layers: list[list] = []
+#     while frontier:
+#         layer = list(frontier); layers.append(layer); frontier = []
+#         for u in layer:
+#             for v in edges[u]:
+#                 indeg[v] -= 1
+#                 if indeg[v] == 0:
+#                     frontier.append(v)
+
+#     # Evaluate per layer; state grows monotonically
+#     state = set(atoms)
+#     derived_all = set()
+#     # (Optional) cache object choices per predicate once
+#     by_type = {}
+#     for o in objects:
+#         by_type.setdefault(o.type, []).append(o)
+#     choices_cache = {
+#         p: list(itertools.product(*(by_type[t] for t in p.types)))
+#         for p in derived_preds
+#     }
+
+#     for layer in layers:
+#         for p in layer:
+#             for choice in choices_cache[p]:
+#                 if p.holds(state, choice):
+#                     derived_all.add(GroundAtom(p, choice))
+#         state |= derived_all  # grow state for next layer
+
+#     return derived_all
+
+
+def abstract_with_derived_predicates(
+        atoms: Set[GroundAtom], derived_preds: Collection[DerivedPredicate],
+        objects: Collection[Object]) -> Set[GroundAtom]:
+    """Compute the fixed point of concept predicate atoms."""
+    primitive_atoms = atoms
+    new_concept_atoms: Set[GroundAtom] = set()
+    prev_new_concept_atoms: Set[GroundAtom] = set()
+    counter = 0
+    while True:
+        # All the concept atoms that holds; all the previous atoms
+        atoms = primitive_atoms | new_concept_atoms
+        new_concept_atoms = _abstract_with_derived_predicates(
+            atoms, derived_preds, objects)
+        # logging.debug(f"ite {counter} concept atoms: {new_concept_atoms}")
+        converged = new_concept_atoms == prev_new_concept_atoms
+        if converged:
+            # logging.debug("converged")
+            break
+        prev_new_concept_atoms = new_concept_atoms
+        counter += 1
+    return new_concept_atoms
+
+
+def _abstract_with_derived_predicates(
+        abs_state: Set[GroundAtom],
+        derived_preds: Collection[DerivedPredicate],
+        objects: Collection[Object]) -> Set[GroundAtom]:
+    """Get the atoms based on the existing atomic state and concept
+    predicates."""
+    atoms: Set[GroundAtom] = set()
+    for pred in derived_preds:
+        for choice in get_object_combinations(objects, pred.types):
+            try:
+                if pred.holds(abs_state, choice):
+                    atoms.add(GroundAtom(pred, choice))
+            except Exception as e:
+                logging.error(f"Error in evaluating concept predicate {pred}: "
+                              f"{e}")
+                # raise e
+                raise PredicateEvaluationError(
+                    f"Error in evaluating concept predicate {pred}: {e}", pred)
+    return atoms
+
+
+def get_base_supporter_predicates(
+        root_predicate: DerivedPredicate) -> Set[Predicate]:
+    """Finds all primitive (non-derived) supporter predicates for a given root
+    derived predicate by traversing its dependency graph."""
+    base_predicates: Set[Predicate] = set()
+
+    # Use a worklist to process predicates in a breadth-first manner.
+    predicates_to_process: List[Predicate] = list(
+        root_predicate.auxiliary_predicates or [])
+    processed_predicates: Set[Predicate] = {root_predicate}
+
+    while predicates_to_process:
+        pred = predicates_to_process.pop(0)
+
+        if pred in processed_predicates:
+            continue
+        processed_predicates.add(pred)
+
+        # If the predicate is derived, add its auxiliaries to the worklist.
+        if isinstance(pred, DerivedPredicate):
+            predicates_to_process.extend(pred.auxiliary_predicates or [])
+        # If it's a primitive predicate, we've found a base supporter.
+        else:
+            base_predicates.add(pred)
+
+    return base_predicates
+
+
+class PredicateEvaluationError(Exception):
+
+    def __init__(self, message: str, pred: Any) -> None:
+        super().__init__(message)
+        self.pred = pred

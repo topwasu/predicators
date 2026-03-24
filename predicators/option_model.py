@@ -7,7 +7,8 @@ option in the environment.
 from __future__ import annotations
 
 import abc
-from typing import Callable, Set, Tuple
+import logging
+from typing import Callable, Optional, Set, Tuple
 
 import numpy as np
 
@@ -15,23 +16,27 @@ from predicators import utils
 from predicators.envs import create_new_env
 from predicators.ground_truth_models import get_gt_options
 from predicators.settings import CFG
-from predicators.structs import Action, DefaultState, ParameterizedOption, \
-    State, _Option
+from predicators.structs import Action, DefaultState, LowLevelTrajectory, \
+    ParameterizedOption, State, _Option
 
 
-def create_option_model(name: str) -> _OptionModelBase:
-    """Create an option model given its name."""
+def create_option_model(name: str,
+                        use_gui: Optional[bool] = None) -> _OptionModelBase:
+    """Create an option model given its name.
+
+    Args:
+        name: The name of the option model.
+        use_gui: If provided, overrides CFG.option_model_use_gui for the
+            environment created by this option model.
+    """
+    gui = CFG.option_model_use_gui if use_gui is None else use_gui
     if name == "oracle":
-        env = create_new_env(CFG.env,
-                             do_cache=False,
-                             use_gui=CFG.option_model_use_gui)
+        env = create_new_env(CFG.env, do_cache=False, use_gui=gui)
         options = get_gt_options(env.get_name())
         return _OracleOptionModel(options, env.simulate)
     if name.startswith("oracle"):
         env_name = name[name.index("_") + 1:]
-        env = create_new_env(env_name,
-                             do_cache=False,
-                             use_gui=CFG.option_model_use_gui)
+        env = create_new_env(env_name, do_cache=False, use_gui=gui)
         options = get_gt_options(env.get_name())
         return _OracleOptionModel(options, env.simulate)
     raise NotImplementedError(f"Unknown option model: {name}")
@@ -63,9 +68,16 @@ class _OracleOptionModel(_OptionModelBase):
         super().__init__()
         self._name_to_parameterized_option = {o.name: o for o in options}
         self._simulator = simulator
+        # Diagnostic: stores the reason when the last call returned 0 actions.
+        self.last_execution_failure: str | None = None
+        # Stores the full trajectory from the last successful execution.
+        self.last_trajectory: LowLevelTrajectory | None = None
 
     def get_next_state_and_num_actions(self, state: State,
                                        option: _Option) -> Tuple[State, int]:
+        self.last_execution_failure = None
+        self.last_trajectory = None
+
         # We do not want to actually execute the option; we want to know what
         # *would* happen if we were to execute the option. So, we will make a
         # copy of the option and run that instead. This is important if the
@@ -104,9 +116,17 @@ class _OracleOptionModel(_OptionModelBase):
             def _terminal(s: State) -> bool:
                 nonlocal last_state
                 if option_copy.terminal(s):
+                    logging.debug("Option reached terminal state.")
                     return True
                 if last_state is not DefaultState and last_state.allclose(s):
-                    raise utils.OptionExecutionFailure("Option got stuck.")
+                    logging.debug("Option got stuck.")
+                    raise utils.OptionExecutionFailure(
+                        f"Option '{option_copy.name}' got stuck: the "
+                        f"policy's action did not change the state. "
+                        f"This usually means the first motion phase "
+                        f"produced a no-op (e.g. IK returned current "
+                        f"joints, or finger command matched current "
+                        f"finger state).")
                 last_state = s
                 return False
         else:
@@ -120,12 +140,14 @@ class _OracleOptionModel(_OptionModelBase):
                 state,
                 _terminal,
                 max_num_steps=CFG.max_num_steps_option_rollout)
-        except utils.OptionExecutionFailure:
+        except utils.OptionExecutionFailure as e:
             # If there is a failure during the execution of the option, treat
             # this as a noop.
+            self.last_execution_failure = str(e)
             return state, 0
         # Note that in the case of using a PyBullet environment, the
         # second return value (num_actions) will be an underestimate
         # since we are not actually rolling out the option in the full
         # simulator, but that's okay; it leads to optimistic planning.
+        self.last_trajectory = traj
         return traj.states[-1], len(traj.actions)

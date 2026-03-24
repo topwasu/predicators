@@ -17,6 +17,7 @@ from typing import Type as TypingType
 from predicators import utils
 from predicators.approaches import BaseApproach
 from predicators.envs import BaseEnv
+from predicators.envs.pybullet_env import PyBulletEnv
 from predicators.execution_monitoring import BaseExecutionMonitor
 from predicators.perception import BasePerceiver
 from predicators.settings import CFG
@@ -119,6 +120,11 @@ class CogMan:
         """See BaseApproach docstring."""
         return self._approach.is_learning_based
 
+    @property
+    def get_approach_name(self) -> str:
+        """See BaseApproach docstring."""
+        return self._approach.get_name()
+
     def learn_from_offline_dataset(self, dataset: Dataset) -> None:
         """See BaseApproach docstring."""
         return self._approach.learn_from_offline_dataset(dataset)
@@ -206,7 +212,13 @@ def run_episode_and_get_observations(
         env.reset(train_or_test, task_idx)
         if monitor is not None:
             monitor.reset(train_or_test, task_idx)
-    obs = env.get_observation()
+    render_obs = (cogman.get_approach_name == "oracle" and\
+                 CFG.offline_data_method == "geo_and_demo_with_vlm_imgs") or\
+                 CFG.rgb_observation
+    if isinstance(env, PyBulletEnv):
+        obs = env.get_observation(render=render_obs)
+    else:
+        obs = env.get_observation()
     observations = [obs]
     actions: List[Action] = []
     curr_option: Optional[_Option] = None
@@ -215,7 +227,8 @@ def run_episode_and_get_observations(
     metrics["num_options_executed"] = 0.0
     exception_raised_in_step = False
     if not (terminate_on_goal_reached and env.goal_reached()):
-        for _ in range(max_num_steps):
+        for step_i in range(max_num_steps):
+            # logging.debug(f"[CogMan] Step {step_i}/{max_num_steps} of episode.")
             monitor_observed = False
             exception_raised_in_step = False
             try:
@@ -236,17 +249,35 @@ def run_episode_and_get_observations(
                 if monitor is not None:
                     monitor.observe(obs, act)
                     monitor_observed = True
-                obs = env.step(act)
+                if isinstance(env, PyBulletEnv):
+                    obs = env.step(act, render_obs=render_obs)
+                else:
+                    obs = env.step(act)
                 actions.append(act)
                 observations.append(obs)
             except Exception as e:
+                logging.debug(f"[CogMan] State at the exception {e}: "
+                              f"{utils.abstract(obs, env.predicates)}")
+                show_stack_trace = True
+                if show_stack_trace:
+                    import traceback
+                    logging.debug(
+                        f"[CogMan] Full traceback:\n{traceback.format_exc()}")
                 if exceptions_to_break_on is not None and \
                    any(issubclass(type(e), c) for c in exceptions_to_break_on):
                     if monitor_observed:
                         exception_raised_in_step = True
                     break
+                if CFG.terminate_on_goal_reached_and_option_terminated and \
+                    env.goal_reached():
+                    break
                 if monitor is not None and not monitor_observed:
                     monitor.observe(obs, None)
+                if CFG.keep_failed_demos:
+                    cogman.finish_episode(obs)
+                    traj = (observations, actions)
+                    solved = env.goal_reached()
+                    return traj, solved, metrics
                 raise e
             if terminate_on_goal_reached and env.goal_reached():
                 break

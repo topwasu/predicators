@@ -1,5 +1,6 @@
 """An explorer that takes random NSRTs."""
 
+import logging
 from typing import List, Set
 
 from gym.spaces import Box
@@ -9,7 +10,7 @@ from predicators.explorers.base_explorer import BaseExplorer
 from predicators.settings import CFG
 from predicators.structs import NSRT, Action, DummyOption, \
     ExplorationStrategy, ParameterizedOption, Predicate, State, Task, Type, \
-    _GroundNSRT
+    _GroundEndogenousProcess, _GroundNSRT
 
 
 class RandomNSRTsExplorer(BaseExplorer):
@@ -91,12 +92,20 @@ class RandomNSRTsExplorer(BaseExplorer):
                     state, ground_nsrts, self._predicates, self._rng)
                 if ground_nsrt is None:
                     return fallback_policy(state)
-                assert all(a.holds for a in ground_nsrt.preconditions)
+                if isinstance(ground_nsrt, _GroundNSRT):
+                    assert all(a.holds for a in ground_nsrt.preconditions)
+                elif isinstance(
+                        ground_nsrt,
+                        _GroundEndogenousProcess):  # type: ignore[unreachable]
+                    assert all(a.holds for a in ground_nsrt.condition_at_start)
+                else:
+                    raise Exception  # type: ignore[unreachable]
 
                 # Sample an option.
                 option = ground_nsrt.sample_option(state,
                                                    goal=task.goal,
                                                    rng=self._rng)
+                logging.debug(f"Chosen option: {option}")
                 cur_option = option
                 assert cur_option.initiable(state)
 

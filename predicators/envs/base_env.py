@@ -87,6 +87,11 @@ class BaseEnv(abc.ABC):
         return self.goal_predicates
 
     @property
+    def target_predicates(self) -> Set[Predicate]:
+        """Get the subset of self.predicates that we want to invent."""
+        return self.predicates
+
+    @property
     @abc.abstractmethod
     def types(self) -> Set[Type]:
         """Get the set of types that are given with this environment."""
@@ -407,3 +412,8 @@ class BaseEnv(abc.ABC):
         # outputted in when querying the VLM. That way, we can use the same
         # function to sanitize atoms regardless of their origin.
         return [[a] for a in atom_strs]
+
+    def is_task_solvable(self, task: EnvironmentTask) -> bool:
+        """Check if the task is solvable."""
+        del task  # unused
+        return True

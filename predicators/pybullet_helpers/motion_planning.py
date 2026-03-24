@@ -97,4 +97,12 @@ def run_motion_planning(
                         num_iters=CFG.pybullet_birrt_num_iters,
                         smooth_amt=CFG.pybullet_birrt_smooth_amt)
 
-    return birrt.query(initial_positions, target_positions)
+    path = birrt.query(initial_positions, target_positions)
+    if path is not None and CFG.pybullet_birrt_path_subsample_ratio > 1:
+        ratio = CFG.pybullet_birrt_path_subsample_ratio
+        last = path[-1]
+        path = [path[i] for i in range(0, len(path), ratio)]
+        # Always include the final waypoint.
+        if path[-1] is not last:
+            path.append(last)
+    return path

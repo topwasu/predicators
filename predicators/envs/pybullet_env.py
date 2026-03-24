@@ -1,25 +1,45 @@
 """Base class for a PyBullet environment.
 
-Contains useful common code.
+Provides common functionality for PyBullet-based robotic manipulation
+environments including robot control, state synchronization, grasp detection,
+and rendering.
+
+For a comprehensive guide on creating new PyBullet environments, see:
+    docs/pybullet_env_guide.md
+
+Quick reference - required methods to implement:
+    - get_name() -> str
+    - initialize_pybullet(using_gui) -> (physics_id, robot, bodies_dict)
+    - _store_pybullet_bodies(bodies_dict)
+    - _get_object_ids_for_held_check() -> List[int]
+    - _create_task_specific_objects(state)
+    - _reset_custom_env_state(state)
+    - _extract_feature(obj, feature) -> float
 """
 
 import abc
+import logging
+from pprint import pformat
 from typing import Any, ClassVar, Dict, List, Optional, Sequence, Tuple, cast
 
 import matplotlib
 import numpy as np
 import pybullet as p
 from gym.spaces import Box
+from PIL import Image
 
 from predicators import utils
 from predicators.envs import BaseEnv
 from predicators.pybullet_helpers.camera import create_gui_connection
-from predicators.pybullet_helpers.geometry import Pose3D, Quaternion
+from predicators.pybullet_helpers.geometry import Pose, Pose3D, Quaternion
 from predicators.pybullet_helpers.link import get_link_state
-from predicators.pybullet_helpers.robots import SingleArmPyBulletRobot
+from predicators.pybullet_helpers.objects import update_object
+from predicators.pybullet_helpers.robots import SingleArmPyBulletRobot, \
+    create_single_arm_pybullet_robot
 from predicators.settings import CFG
-from predicators.structs import Action, Array, EnvironmentTask, Observation, \
-    State, Video
+from predicators.structs import Action, Array, EnvironmentTask, Mask, Object, \
+    Observation, State, Video
+from predicators.utils import PyBulletState
 
 
 class PyBulletEnv(BaseEnv):
@@ -27,22 +47,45 @@ class PyBulletEnv(BaseEnv):
     # Parameters that aren't important enough to need to clog up settings.py
 
     # General robot parameters.
-    grasp_tol: ClassVar[float] = 0.05
+    # grasp_tol: value for which the objects with distance below to are
+    # considered to be grasped, and also the value change finger option can be
+    # terminated.
+    grasp_tol: ClassVar[float] = 5e-2  # for large objects
+    grasp_tol_small: ClassVar[float] = 5e-4  # for small objects
     _finger_action_tol: ClassVar[float] = 1e-4
+    open_fingers: ClassVar[float] = 0.04
+    closed_fingers: ClassVar[float] = 0.01
+    robot_base_pos: ClassVar[Optional[Tuple[float, float, float]]] = None
+    robot_base_orn: ClassVar[Optional[Tuple[float, float, float,
+                                            float]]] = None
 
     # Object parameters.
     _obj_mass: ClassVar[float] = 0.5
     _obj_friction: ClassVar[float] = 1.2
-    _obj_colors: ClassVar[Sequence[Tuple[float, float, float, float]]] = [
-        (0.95, 0.05, 0.1, 1.),
-        (0.05, 0.95, 0.1, 1.),
-        (0.1, 0.05, 0.95, 1.),
-        (0.4, 0.05, 0.6, 1.),
-        (0.6, 0.4, 0.05, 1.),
-        (0.05, 0.04, 0.6, 1.),
-        (0.95, 0.95, 0.1, 1.),
-        (0.95, 0.05, 0.95, 1.),
-        (0.05, 0.95, 0.95, 1.),
+    _obj_colors_main: ClassVar[List[Tuple[float, float, float,
+                                          float]]] = [(0.95, 0.05, 0.1, 1.),
+                                                      (0.05, 0.95, 0.1, 1.),
+                                                      (0.1, 0.05, 0.95, 1.),
+                                                      (0.4, 0.05, 0.6, 1.),
+                                                      (0.6, 0.4, 0.05, 1.),
+                                                      (0.05, 0.04, 0.6, 1.),
+                                                      (0.95, 0.95, 0.1, 1.),
+                                                      (0.95, 0.05, 0.95, 1.),
+                                                      (0.05, 0.95, 0.95, 1.)]
+    _obj_colors: ClassVar[List[Tuple[float, float, float, float]]] =\
+        _obj_colors_main + [
+        (0.941, 0.196, 0.196, 1.),  # Red
+        (0.196, 0.941, 0.196, 1.),  # Green
+        (0.196, 0.196, 0.941, 1.),  # Blue
+        (0.941, 0.941, 0.196, 1.),  # Yellow
+        (0.941, 0.196, 0.941, 1.),  # Magenta
+        (0.196, 0.941, 0.941, 1.),  # Cyan
+        (0.941, 0.588, 0.196, 1.),  # Orange
+        (0.588, 0.196, 0.941, 1.),  # Purple
+        (0.196, 0.941, 0.588, 1.),  # Teal
+        (0.941, 0.196, 0.588, 1.),  # Pink
+        (0.588, 0.941, 0.196, 1.),  # Lime
+        (0.196, 0.588, 0.941, 1.),  # Sky Blue
     ]
     _out_of_view_xy: ClassVar[Sequence[float]] = [10.0, 10.0]
     _default_orn: ClassVar[Sequence[float]] = [0.0, 0.0, 0.0, 1.0]
@@ -52,10 +95,15 @@ class PyBulletEnv(BaseEnv):
     _camera_yaw: ClassVar[float] = 90.0
     _camera_pitch: ClassVar[float] = -24
     _camera_target: ClassVar[Pose3D] = (1.65, 0.75, 0.42)
+    _camera_fov: ClassVar[float] = 60
     _debug_text_position: ClassVar[Pose3D] = (1.65, 0.25, 0.75)
 
     def __init__(self, use_gui: bool = True) -> None:
         super().__init__(use_gui)
+
+        # Forward declaration: subclasses must define _robot before using methods
+        # that access it (like _extract_robot_state, _get_robot_state_dict, etc.)
+        self._robot: Object
 
         # When an object is held, a constraint is created to prevent slippage.
         self._held_constraint_id: Optional[int] = None
@@ -67,16 +115,63 @@ class PyBulletEnv(BaseEnv):
             self.initialize_pybullet(self.using_gui)
         self._store_pybullet_bodies(pybullet_bodies)
 
+        # What are they used for??
+        # It's used in get_state, reset_state and labeling state.
+        # Should be populated at reset or reset state.
+        self._objects: List[Object] = []
+
+    def get_extra_collision_ids(self) -> Sequence[int]:
+        """Return extra PyBullet body IDs to treat as collision obstacles.
+
+        Override in subclasses for bodies not tracked as state Objects
+        (e.g. liquid blocks in Grow).
+        """
+        return ()
+
+    def get_object_by_id(self, obj_id: int) -> Object:
+        for obj in self._objects:
+            if obj.id == obj_id:
+                return obj
+        raise ValueError(f"Object with ID {obj_id} not found")
+
     @classmethod
     def initialize_pybullet(
             cls, using_gui: bool
     ) -> Tuple[int, SingleArmPyBulletRobot, Dict[str, Any]]:
-        """Returns physics client ID, robot, and dictionary containing other
-        object IDs and any other info from pybullet that needs to be tracked.
+        """Initialize the PyBullet environment.
 
-        This is a public class method because the oracle options use it too.
+        This method initializes the PyBullet physics simulation, loads the robot
+        and shared object models, and returns the physics client ID, the robot
+        instance, and a dictionary containing other object IDs and any additional
+        information that needs to be tracked.
 
-        Subclasses may override to load additional assets.
+        Args:
+            using_gui (bool): If True, the PyBullet GUI will be used. Otherwise,
+                            the simulation will run in headless mode.
+
+        Returns:
+            Tuple[int, SingleArmPyBulletRobot, Dict[str, Any]]:
+                - int: The physics client ID.
+                - SingleArmPyBulletRobot: The robot instance.
+                - Dict[str, Any]: A dictionary containing object IDs and other
+                                information from PyBullet that needs to be
+                                tracked.
+
+        Notes:
+            - This is a public class method because it is also used by the
+            oracle options.
+            - This method loads object models that are shared across tasks.
+            These objects can have different poses or colors, and the number of
+            objects can vary across tasks (e.g., the number of blocks in the
+            blocks domain). However, an object's size cannot be changed after
+            loading.
+            - Task-specific objects that need to be loaded with different sizes
+            or other properties should be handled in the
+            `_create_task_specific_objects` method, which is called during each
+            task's reset.
+            - Subclasses may override this method to load additional assets. In
+            the subclass, register all object IDs here and move them out of view
+            in the `reset_custom_env_state` method.
         """
         # Skip test coverage because GUI is too expensive to use in unit tests
         # and cannot be used in headless mode.
@@ -93,7 +188,7 @@ class PyBulletEnv(BaseEnv):
         p.resetSimulation(physicsClientId=physics_client_id)
 
         # Load plane.
-        p.loadURDF(utils.get_env_asset_path("urdf/plane.urdf"), [0, 0, -1],
+        p.loadURDF(utils.get_env_asset_path("urdf/plane.urdf"), [0, 0, 0],
                    useFixedBase=True,
                    physicsClientId=physics_client_id)
 
@@ -116,14 +211,23 @@ class PyBulletEnv(BaseEnv):
         raise NotImplementedError("Override me!")
 
     @classmethod
-    @abc.abstractmethod
     def _create_pybullet_robot(
             cls, physics_client_id: int) -> SingleArmPyBulletRobot:
-        """Make and return a PyBullet robot object in the given
-        physics_client_id."""
-        raise NotImplementedError("Override me!")
+        robot_ee_orn = cls.get_robot_ee_home_orn()
+        ee_home = Pose(
+            (cls.robot_init_x, cls.robot_init_y,
+             cls.robot_init_z),  # type: ignore[attr-defined]
+            robot_ee_orn)
 
-    @abc.abstractmethod
+        if cls.robot_base_pos is None or cls.robot_base_orn is None:
+            base_pose = None
+        else:
+            base_pose = Pose(cls.robot_base_pos, cls.robot_base_orn)
+
+        return create_single_arm_pybullet_robot(CFG.pybullet_robot,
+                                                physics_client_id, ee_home,
+                                                base_pose)
+
     def _extract_robot_state(self, state: State) -> Array:
         """Given a State, extract the robot state, to be passed into
         self._pybullet_robot.reset_state().
@@ -131,12 +235,40 @@ class PyBulletEnv(BaseEnv):
         This should be the same type as the return value of
         self._pybullet_robot.get_state().
         """
-        raise NotImplementedError("Override me!")
 
-    @abc.abstractmethod
-    def _get_state(self) -> State:
-        """Create a State based on the current PyBullet state."""
-        raise NotImplementedError("Override me!")
+        # EE Position
+        def get_pos_feature(
+                state: State,
+                feature_name: str) -> float:  # type: ignore[no-untyped-def]
+            if feature_name in self._robot.type.feature_names:
+                return state.get(self._robot, feature_name)
+            elif f"pose_{feature_name}" in self._robot.type.feature_names:
+                return state.get(self._robot, f"pose_{feature_name}")
+            else:
+                raise ValueError(f"Cannot find robot pos '{feature_name}'")
+
+        rx = get_pos_feature(state, "x")
+        ry = get_pos_feature(state, "y")
+        rz = get_pos_feature(state, "z")
+
+        # EE Orientation
+        _, default_tilt, default_wrist = p.getEulerFromQuaternion(
+            self.get_robot_ee_home_orn())
+        if "tilt" in self._robot.type.feature_names:
+            tilt = state.get(self._robot, "tilt")
+        else:
+            tilt = default_tilt
+        if "wrist" in self._robot.type.feature_names:
+            wrist = state.get(self._robot, "wrist")
+        else:
+            wrist = default_wrist
+        qx, qy, qz, qw = p.getQuaternionFromEuler([0.0, tilt, wrist])
+
+        # Fingers
+        f = state.get(self._robot, "fingers")
+        f = self._fingers_state_to_joint(self._pybullet_robot, f)
+
+        return np.array([rx, ry, rz, qx, qy, qz, qw, f], dtype=np.float32)
 
     @abc.abstractmethod
     def _get_object_ids_for_held_check(self) -> List[int]:
@@ -145,15 +277,57 @@ class PyBulletEnv(BaseEnv):
         held."""
         raise NotImplementedError("Override me!")
 
-    @abc.abstractmethod
     def _get_expected_finger_normals(self) -> Dict[int, Array]:
-        """Get the expected finger normals, used in detect_held_object(), as a
-        mapping from finger link index to a unit-length normal vector.
+        # Get the current state of the robot, including the orientation quaternion
+        rx, ry, rz, qx, qy, qz, qw, rf = self._pybullet_robot.get_state()
 
-        This is environment-specific because it depends on the end
-        effector's orientation when grasping.
-        """
-        raise NotImplementedError("Override me!")
+        # Convert the quaternion to a rotation matrix
+        rotation_matrix = p.getMatrixFromQuaternion([qx, qy, qz, qw])
+        rotation_matrix = np.array(rotation_matrix).reshape(3, 3)
+
+        # Define the initial normal vectors for the fingers
+        if CFG.pybullet_robot == "panda":
+            # gripper rotated 90deg so parallel to x-axis
+            normal = np.array([1., 0., 0.], dtype=np.float32)
+        elif CFG.pybullet_robot in {"fetch", "mobile_fetch"}:
+            # gripper parallel to y-axis
+            normal = np.array([0., 1., 0.], dtype=np.float32)
+        else:  # pragma: no cover
+            # Shouldn't happen unless we introduce a new robot.
+            raise ValueError(f"Unknown robot {CFG.pybullet_robot}")
+
+        # Transform the normal vectors using the rotation matrix
+        transformed_normal = rotation_matrix.dot(normal)
+        transformed_normal_neg = rotation_matrix.dot(-1 * normal)
+
+        return {
+            self._pybullet_robot.left_finger_id: transformed_normal,
+            self._pybullet_robot.right_finger_id: transformed_normal_neg,
+        }
+
+    @classmethod
+    def _fingers_state_to_joint(cls, pybullet_robot: SingleArmPyBulletRobot,
+                                finger_state: float) -> float:
+        """Map the fingers in the given *State* to joint values for
+        PyBullet."""
+        # If open_fingers is undefined, use 1.0 as the default.
+        subs = {
+            cls.open_fingers: pybullet_robot.open_fingers,
+            cls.closed_fingers: pybullet_robot.closed_fingers,
+        }
+        match = min(subs, key=lambda k: abs(k - finger_state))
+        return subs[match]
+
+    @classmethod
+    def _fingers_joint_to_state(cls, pybullet_robot: SingleArmPyBulletRobot,
+                                finger_joint: float) -> float:
+        """Inverse of _fingers_state_to_joint()."""
+        subs = {
+            pybullet_robot.open_fingers: cls.open_fingers,
+            pybullet_robot.closed_fingers: cls.closed_fingers,
+        }
+        match = min(subs, key=lambda k: abs(k - finger_joint))
+        return subs[match]
 
     @property
     def action_space(self) -> Box:
@@ -161,6 +335,9 @@ class PyBulletEnv(BaseEnv):
 
     def simulate(self, state: State, action: Action) -> State:
         # Optimization: check if we're already in the right state.
+        # self._current_observation is None at the beginning
+        # state is not allclose to self._current_state when the state has been
+        # updated, so it first calls _reset_state to update the pybullet state
         if self._current_observation is None or \
             not state.allclose(self._current_state):
             self._current_observation = state
@@ -183,31 +360,281 @@ class PyBulletEnv(BaseEnv):
         raise NotImplementedError("A PyBullet environment cannot render "
                                   "arbitrary states.")
 
-    def reset(self, train_or_test: str, task_idx: int) -> Observation:
+    def reset(self,
+              train_or_test: str,
+              task_idx: int,
+              render: bool = False) -> Observation:
         state = super().reset(train_or_test, task_idx)
         self._reset_state(state)
-        # Converts the State into a PyBulletState.
-        self._current_observation = self._get_state()
-        return self._current_observation.copy()
+        observation = self.get_observation(render=render)
+        return observation
 
     def _reset_state(self, state: State) -> None:
-        """Helper for reset and testing."""
-        # Tear down the old PyBullet scene.
+        """Reset the PyBullet state to match the given state.
+
+        Used in initialization (reset(), _add_pybullet_state_to_tasks())
+        and bilevel planning (when creating the option model)).
+        """
+        self._objects = list(state.data)
+        # 1) Clear old constraint if we had a held object
         if self._held_constraint_id is not None:
             p.removeConstraint(self._held_constraint_id,
                                physicsClientId=self._physics_client_id)
             self._held_constraint_id = None
+        self._held_obj_to_base_link = None
         self._held_obj_id = None
 
-        # Reset robot.
+        # 2) Reset robot pose
         self._pybullet_robot.reset_state(self._extract_robot_state(state))
+
+        # I want to have a step that creates task specific objects before reset
+        # their positions, what should I call this?
+        self._create_task_specific_objects(state)
+
+        # 3) Reset all known objects (position, orientation, etc.)
+        for obj in self._objects:
+            if obj.type.name in [
+                    "robot", "loc", "angle", "human", "side", "direction"
+            ]:
+                continue
+            self._reset_single_object(obj, state)
+
+        # 4) Let the subclass do any additional specialized resetting
+        self._reset_custom_env_state(state)
+
+        # 5) (Optional) Check for reconstruction mismatch in debug mode
+        #    (Helps catch if the environment hook overwrites something.)
+        reconstructed = self._get_state()
+        if not reconstructed.allclose(state):
+            logging.warning("Could not reconstruct state exactly in reset.")
+
+    @abc.abstractmethod
+    def _create_task_specific_objects(self, state: State) -> None:
+        raise NotImplementedError("Override me!")
+
+    def _reset_single_object(self, obj: Object, state: State) -> None:
+        """Shared logic for setting position/orientation and constraints."""
+        # If the environment doesn’t want the base class to handle it,
+        # it can skip or override this method. By default, look for
+        # standard features: x, y, z, rot, is_held.
+
+        # 1) Position/orientation if those features exist
+        # try:
+        features = obj.type.feature_names
+        cur_x, cur_y, cur_z = p.getBasePositionAndOrientation(
+            obj.id, physicsClientId=self._physics_client_id)[0]
+        # except:
+        #     breakpoint()
+        px = state.get(obj, "x") if "x" in obj.type.feature_names else cur_x
+        py = state.get(obj, "y") if "y" in obj.type.feature_names else cur_y
+        pz = state.get(obj, "z") if "z" in obj.type.feature_names else cur_z
+
+        if "rot" in features:
+            angle = state.get(obj, "rot")
+            # Convert from 2D angle to a 3D quaternion (assuming rotation around z)
+            orn = p.getQuaternionFromEuler([0.0, 0.0, angle])
+        elif "yaw" in features:
+            angle = state.get(obj, "yaw")
+            orn = p.getQuaternionFromEuler([0.0, 0.0, angle])
+        else:
+            orn = self._default_orn  # e.g. (0,0,0,1)
+
+        # 2) Update the object’s position/orientation in PyBullet
+        update_object(obj.id, (px, py, pz),
+                      orn,
+                      physics_client_id=self._physics_client_id)
+
+        # 3) If there's an is_held feature, reattach constraints if needed
+        if "is_held" in features:
+            if state.get(obj, "is_held") > 0.5:
+                # attach constraint
+                self._held_obj_id = obj.id
+                self._create_grasp_constraint()
+                # _create_grasp_constraint already correctly computes
+                # and stores _held_obj_to_base_link.
+
+    @abc.abstractmethod
+    def _reset_custom_env_state(self, state: State) -> None:
+        """Hook for environment-specific resetting (colors, water, etc.).
+
+        Subclasses can override or extend this if needed.
+        """
+        raise NotImplementedError("Override me!")
+
+    def _get_state(self, render_obs: bool = False) -> State:
+        """Reads the PyBullet scene into a `State` (PyBulletState). It takes
+        care of:
+
+        * robot features [x, y, z, tilt, wrist, fingers]
+        * object features [x, y, z, rot, is_held]
+        the other feature extractors should be implemented in the subclasses via
+        `_extract_feature`.
+        """
+        state_dict: Dict[Object, Dict[str, float]] = {}
+
+        # --- 1) Robot ---
+        robot_state = self._get_robot_state_dict()
+        state_dict[self._robot] = robot_state
+
+        # --- 2) Other Objects ---
+        for obj in self._objects:
+            if obj.type.name in ["robot"]:
+                continue
+
+            obj_features = obj.type.feature_names
+            obj_dict = {}
+
+            if obj.type.name in ["loc", "angle", "human", "side", "direction"]:
+                for feature in obj_features:
+                    obj_dict[feature] = self._extract_feature(obj, feature)
+                state_dict[obj] = obj_dict
+                continue
+
+            # Basic features
+            try:
+                (px, py, pz), orn = p.getBasePositionAndOrientation(
+                    obj.id, physicsClientId=self._physics_client_id)
+            except:
+                breakpoint()
+            if "x" in obj_features:
+                obj_dict["x"] = px
+            if "y" in obj_features:
+                obj_dict["y"] = py
+            if "z" in obj_features:
+                obj_dict["z"] = pz
+            if "rot" in obj_features or "yaw" in obj_features or \
+                "roll" in obj_features or "pitch" in obj_features:
+                roll, pitch, yaw = p.getEulerFromQuaternion(orn)
+                if "rot" in obj_features:
+                    obj_dict["rot"] = yaw
+                if "yaw" in obj_features:
+                    obj_dict["yaw"] = yaw
+                if "roll" in obj_features:
+                    obj_dict["roll"] = roll
+                if "pitch" in obj_features:
+                    obj_dict["pitch"] = pitch
+            if "is_held" in obj_features:
+                obj_dict["is_held"] = 1.0 if obj.id == self._held_obj_id \
+                                            else 0.0
+
+            if "r" in obj_features or "b" in obj_features or \
+                "g" in obj_features:
+                # TODO: also handle color_r, color_b, ...
+                visual_data = p.getVisualShapeData(
+                    obj.id, physicsClientId=self._physics_client_id)[0]
+                (r, g, b, a) = visual_data[7]
+                obj_dict["r"] = r
+                obj_dict["g"] = g
+                obj_dict["b"] = b
+
+            # Additional features
+            for feature in obj_features:
+                if feature not in [
+                        "x", "y", "z", "rot", "yaw", "roll", "pitch",
+                        "is_held", "r", "g", "b"
+                ]:
+                    obj_dict[feature] = self._extract_feature(obj, feature)
+
+            state_dict[obj] = obj_dict
+
+        # Convert to a PyBulletState
+        # try:
+        state = utils.create_state_from_dict(state_dict)
+        # except:
+        #     breakpoint()
+        joint_positions = self._pybullet_robot.get_joints()
+        pyb_state = PyBulletState(state.data,
+                                  simulator_state={
+                                      "joint_positions": joint_positions,
+                                      "physics_client_id":
+                                      self._physics_client_id,
+                                      "robot_id":
+                                      self._pybullet_robot.robot_id,
+                                  })
+        return pyb_state
+
+    @abc.abstractmethod
+    def _extract_feature(self, obj: Object, feature: str) -> float:
+        """Called in _get_state() to extract a feature from an object."""
+        raise NotImplementedError("Override me!")
+
+    def _get_robot_state_dict(self) -> Dict[str, float]:
+        """Get dict state of the robot."""
+        r_dict = {}
+        r_features = self._robot.type.feature_names
+        if CFG.env == "pybullet_cover":
+            rx, ry, rz, _, _, _, _, rf = self._pybullet_robot.get_state()
+            hand = (ry - self.y_lb) / (self.y_ub - self.y_lb
+                                       )  # type: ignore[attr-defined]
+            r_dict.update({"hand": hand, "pose_x": rx, "pose_z": rz})
+        elif CFG.env == "pybullet_blocks":
+            rx, ry, rz, _, _, _, _, rf = self._pybullet_robot.get_state()
+            fingers = self._fingers_joint_to_state(self._pybullet_robot, rf)
+            r_dict.update({
+                "pose_x": rx,
+                "pose_y": ry,
+                "pose_z": rz,
+                "fingers": fingers
+            })
+        else:
+            rx, ry, rz, qx, qy, qz, qw, rf = self._pybullet_robot.get_state()
+            r_dict.update({"x": rx, "y": ry, "z": rz, "fingers": rf})
+            _, tilt, wrist = p.getEulerFromQuaternion([qx, qy, qz, qw])
+            if "tilt" in r_features:
+                r_dict["tilt"] = tilt
+            if "wrist" in r_features:
+                r_dict["wrist"] = wrist
+        return r_dict
 
     def render(self,
                action: Optional[Action] = None,
                caption: Optional[str] = None) -> Video:  # pragma: no cover
         # Skip test coverage because GUI is too expensive to use in unit tests
         # and cannot be used in headless mode.
-        del caption  # unused
+        del action, caption  # unused
+
+        view_matrix = p.computeViewMatrixFromYawPitchRoll(
+            cameraTargetPosition=self._camera_target,
+            distance=self._camera_distance,
+            yaw=self._camera_yaw,
+            pitch=self._camera_pitch,
+            roll=0,
+            upAxisIndex=2,
+            physicsClientId=self._physics_client_id)
+
+        width = CFG.pybullet_camera_width
+        height = CFG.pybullet_camera_height
+
+        proj_matrix = p.computeProjectionMatrixFOV(
+            fov=self._camera_fov,
+            aspect=float(width / height),
+            nearVal=0.1,
+            farVal=100.0,
+            physicsClientId=self._physics_client_id)
+
+        (_, _, px, _,
+         _) = p.getCameraImage(width=width,
+                               height=height,
+                               viewMatrix=view_matrix,
+                               projectionMatrix=proj_matrix,
+                               renderer=p.ER_BULLET_HARDWARE_OPENGL,
+                               physicsClientId=self._physics_client_id)
+
+        rgb_array = np.array(px).reshape((height, width, 4))
+        rgb_array = rgb_array[:, :, :3]
+        return [rgb_array]
+
+    def render_segmented_obj(
+        self,
+        action: Optional[Action] = None,
+        caption: Optional[str] = None,
+    ) -> Tuple[Image.Image, Dict[Object, Mask]]:
+        """Render the scene and the segmented objects in the scene."""
+        del action, caption  # unused
+        # if not self.using_gui:
+        #     raise Exception(
+        #         "Rendering only works with GUI on. See "
+        #         "https://github.com/bulletphysics/bullet3/issues/1157")
 
         view_matrix = p.computeViewMatrixFromYawPitchRoll(
             cameraTargetPosition=self._camera_target,
@@ -228,22 +655,75 @@ class PyBulletEnv(BaseEnv):
             farVal=100.0,
             physicsClientId=self._physics_client_id)
 
-        (_, _, px, _,
-         _) = p.getCameraImage(width=width,
-                               height=height,
-                               viewMatrix=view_matrix,
-                               projectionMatrix=proj_matrix,
-                               renderer=p.ER_BULLET_HARDWARE_OPENGL,
-                               physicsClientId=self._physics_client_id)
+        # Initialize an empty dictionary
+        mask_dict: Dict[Object, Mask] = {}
 
-        rgb_array = np.array(px).reshape((height, width, 4))
-        rgb_array = rgb_array[:, :, :3]
-        return [rgb_array]
+        # Get the original image and segmentation mask
+        (_, _, rgbImg, _,
+         segImg) = p.getCameraImage(width=width,
+                                    height=height,
+                                    viewMatrix=view_matrix,
+                                    projectionMatrix=proj_matrix,
+                                    renderer=p.ER_BULLET_HARDWARE_OPENGL,
+                                    physicsClientId=self._physics_client_id)
 
-    def step(self, action: Action) -> Observation:
+        # Convert to numpy arrays
+        original_image: np.ndarray = np.array(rgbImg, dtype=np.uint8).reshape(
+            (height, width, 4))
+        seg_image = np.array(segImg).reshape((height, width))
+
+        state_img = Image.fromarray(  # type: ignore[no-untyped-call]
+            original_image[:, :, :3])
+
+        # Iterate over all bodies to be labeled
+        for obj in self._objects:
+            body_id = obj.id
+            mask = seg_image == body_id
+            mask_dict[obj] = mask
+
+        return state_img, mask_dict
+
+    def get_observation(self, render: bool = False) -> Observation:
+        """Get the current observation of this environment.
+
+        Currently, this just return a copy of the state and optionally a
+        rendered image.
+        """
+        self._current_observation = self._get_state()
+        assert isinstance(self._current_observation, PyBulletState)
+        state_copy = self._current_observation.copy()
+
+        if render:
+            state_copy.add_images_and_masks(*self.render_segmented_obj())
+
+        return state_copy
+
+    def step(self, action: Action, render_obs: bool = False) -> Observation:
+        """Execute one environment step with the given action.
+
+        This method handles:
+        1. Robot joint control by converting action to target positions
+        2. Management of held objects and grasping constraints
+        3. Physics simulation stepping
+        4. Object grasp detection and constraint creation/removal
+        5. `self._current_observation` update
+
+        Args:
+            action (Action): The action to execute, containing target joint
+            positions
+            render_obs (bool, optional): Whether to include RGB observation.
+                Defaults to False.
+
+        Returns:
+            Observation: Updated environment observation after executing the
+            action. May include an image if render_obs=True or
+            CFG.rgb_observation=True.
+        """
         # Send the action to the robot.
-        target_joint_positions = action.arr.tolist()
-        self._pybullet_robot.set_motors(target_joint_positions)
+        target_joint_positions, base_delta = self._split_action(action)
+        if base_delta.size:
+            self._apply_base_delta(base_delta)
+        self._pybullet_robot.set_motors(target_joint_positions.tolist())
 
         # If we are setting the robot joints directly, and if there is a held
         # object, we need to reset the pose of the held object directly. This
@@ -276,8 +756,11 @@ class PyBulletEnv(BaseEnv):
         # If not currently holding something, and fingers are closing, check
         # for a new grasp.
         if self._held_constraint_id is None and self._fingers_closing(action):
+            # logging.debug("Finger closing")
             # Detect if an object is held. If so, create a grasp constraint.
             self._held_obj_id = self._detect_held_object()
+            # logging.debug(f"Detected held object: {self._held_obj_id}")
+            # breakpoint()
             if self._held_obj_id is not None:
                 self._create_grasp_constraint()
 
@@ -287,10 +770,15 @@ class PyBulletEnv(BaseEnv):
             p.removeConstraint(self._held_constraint_id,
                                physicsClientId=self._physics_client_id)
             self._held_constraint_id = None
+            # logging.debug("Finger opening")
             self._held_obj_id = None
 
-        self._current_observation = self._get_state()
-        return self._current_observation.copy()
+        # Depending on the observation mode, either return object-centric state
+        # or object_centric + rgb observation
+        observation = self.get_observation(render=CFG.rgb_observation or\
+                                                render_obs)
+
+        return observation
 
     def _detect_held_object(self) -> Optional[int]:
         """Return the PyBullet object ID of the held object if one exists.
@@ -312,7 +800,7 @@ class PyBulletEnv(BaseEnv):
                 closest_points = p.getClosestPoints(
                     bodyA=self._pybullet_robot.robot_id,
                     bodyB=obj_id,
-                    distance=self.grasp_tol,
+                    distance=self.grasp_tol_small,
                     linkIndexA=finger_id,
                     physicsClientId=self._physics_client_id)
                 for point in closest_points:
@@ -322,6 +810,7 @@ class PyBulletEnv(BaseEnv):
                     # A perfect score here is 1.0 (normals are unit vectors).
                     contact_normal = point[7]
                     score = expected_normal.dot(contact_normal)
+                    # logging.debug(f"With obj {obj_id}, score: {score}")
                     assert -1.0 <= score <= 1.0
 
                     # Take absolute as object/gripper could be rotated 180
@@ -370,6 +859,7 @@ class PyBulletEnv(BaseEnv):
     def _fingers_opening(self, action: Action) -> bool:
         """Check whether this action is working toward opening the fingers."""
         f_delta = self._action_to_finger_delta(action)
+        # logging.debug(f"Finger delta: {f_delta}")
         return f_delta > self._finger_action_tol
 
     def _get_finger_position(self, state: State) -> float:
@@ -381,22 +871,75 @@ class PyBulletEnv(BaseEnv):
     def _action_to_finger_delta(self, action: Action) -> float:
         assert isinstance(self._current_observation, State)
         finger_position = self._get_finger_position(self._current_observation)
-        target = action.arr[-1]
+        joint_positions, _ = self._split_action(action)
+        target = joint_positions[self._pybullet_robot.left_finger_joint_idx]
+        # logging.debug(f"Finger position: {finger_position}, target: {target}")
         return target - finger_position
+
+    def _split_action(self, action: Action) -> Tuple[np.ndarray, np.ndarray]:
+        """Split an action into joint targets and an optional base delta."""
+        action_arr = action.arr
+        base_dim = int(getattr(self._pybullet_robot, "base_action_dim", 0))
+        if base_dim > 0:
+            expected = len(self._pybullet_robot.arm_joints) + base_dim
+            if action_arr.shape[0] == expected:
+                return action_arr[:-base_dim], action_arr[-base_dim:]
+            if action_arr.shape[0] == len(self._pybullet_robot.arm_joints):
+                zeros = np.zeros(base_dim, dtype=action_arr.dtype)
+                return action_arr, zeros
+            raise ValueError(
+                f"Unexpected action dim {action_arr.shape[0]}, expected "
+                f"{len(self._pybullet_robot.arm_joints)} or {expected}.")
+        return action_arr, np.zeros(0, dtype=action_arr.dtype)
+
+    def _apply_base_delta(self, base_delta: np.ndarray) -> None:
+        """Apply a delta (dx, dy, dtheta) to the robot base if supported."""
+        base_pose = self._pybullet_robot.get_base_pose(
+        )  # type: ignore[attr-defined]
+        current_yaw = p.getEulerFromQuaternion(base_pose.orientation)[2]
+        new_yaw = current_yaw + float(base_delta[2])
+        new_pose = Pose(
+            (base_pose.position[0] + float(base_delta[0]),
+             base_pose.position[1] + float(base_delta[1]),
+             base_pose.position[2]),
+            p.getQuaternionFromEuler([0.0, 0.0, new_yaw]),
+        )
+        self._pybullet_robot.set_base_pose(
+            new_pose)  # type: ignore[attr-defined]
 
     def _add_pybullet_state_to_tasks(
             self, tasks: List[EnvironmentTask]) -> List[EnvironmentTask]:
-        """Converts the task initial states into PyBulletStates."""
+        """Converts the task initial states into PyBulletStates.
+
+        This is used in generating tasks.
+        """
         pybullet_tasks = []
         for task in tasks:
             # Reset the robot.
             init = task.init
-            self._pybullet_robot.reset_state(self._extract_robot_state(init))
             # Extract the joints.
+            # YC: Probably need to reset_state here so I can then get an
+            # observation, would it work without the reset_state?
+            # Attempt 2: First reset it.
+            self._current_observation = init
+            self._reset_state(init)
+            # Cast _current_observation from type State to PybulletState
             joint_positions = self._pybullet_robot.get_joints()
-            pybullet_init = utils.PyBulletState(
+            self._current_observation = utils.PyBulletState(
                 init.data.copy(), simulator_state=joint_positions)
-            pybullet_task = EnvironmentTask(pybullet_init, task.goal)
+            # Attempt 1: Let's try to get a rendering directly first
+            pybullet_init = self.get_observation(render=CFG.render_init_state)
+            pybullet_init.option_history = [
+            ]  # useful for vlm predicate grounding
+            # # <Original code
+            # self._pybullet_robot.reset_state(self._extract_robot_state(init))
+            # joint_positions = self._pybullet_robot.get_joints()
+            # pybullet_init = utils.PyBulletState(
+            #     init.data.copy(), simulator_state=joint_positions)
+            # # >
+            pybullet_task = EnvironmentTask(pybullet_init,
+                                            task.goal,
+                                            goal_nl=task.goal_nl)
             pybullet_tasks.append(pybullet_task)
         return pybullet_tasks
 
@@ -407,18 +950,21 @@ class PyBulletEnv(BaseEnv):
         return robot_ee_orns[CFG.pybullet_robot]
 
 
-def create_pybullet_block(color: Tuple[float, float, float, float],
-                          half_extents: Tuple[float, float,
-                                              float], mass: float,
-                          friction: float, orientation: Sequence[float],
-                          physics_client_id: int) -> int:
+def create_pybullet_block(
+    color: Tuple[float, float, float, float],
+    half_extents: Tuple[float, float, float],
+    mass: float,
+    friction: float,
+    position: Pose3D = (0.0, 0.0, 0.0),
+    orientation: Quaternion = (0.0, 0.0, 0.0, 1.0),
+    physics_client_id: int = 0,
+    add_top_triangle: bool = False,
+) -> int:
     """A generic utility for creating a new block.
 
     Returns the PyBullet ID of the newly created block.
     """
     # The poses here are not important because they are overwritten by
-    # the state values when a task is reset.
-    pose = (0, 0, 0)
 
     # Create the collision shape.
     collision_id = p.createCollisionShape(p.GEOM_BOX,
@@ -435,13 +981,107 @@ def create_pybullet_block(color: Tuple[float, float, float, float],
     block_id = p.createMultiBody(baseMass=mass,
                                  baseCollisionShapeIndex=collision_id,
                                  baseVisualShapeIndex=visual_id,
-                                 basePosition=pose,
+                                 basePosition=position,
                                  baseOrientation=orientation,
                                  physicsClientId=physics_client_id)
     p.changeDynamics(
         block_id,
         linkIndex=-1,  # -1 for the base
         lateralFriction=friction,
+        spinningFriction=friction,
+        rollingFriction=friction,
         physicsClientId=physics_client_id)
 
+    if add_top_triangle:
+        # 1. Create the triangle's visual shape
+        triangle_size = min(half_extents[0], half_extents[1])
+        triangle_vertices = [
+            [triangle_size, 0, 0],  # Tip pointing in +X
+            [-triangle_size, triangle_size, 0],  # Back left
+            [-triangle_size, -triangle_size, 0]  # Back right
+        ]
+        triangle_visual_id = p.createVisualShape(
+            p.GEOM_MESH,
+            vertices=triangle_vertices,
+            indices=[0, 1, 2],  # <-- FIX: Added this line
+            rgbaColor=[1, 1, 0,
+                       1],  # <-- CHANGE: Set to yellow (R=1, G=1, B=0, A=1)
+            physicsClientId=physics_client_id)
+
+        # 2. Re-create the body, but this time WITH a link for the triangle
+        p.removeBody(
+            block_id,
+            physicsClientId=physics_client_id)  # Remove the old simple block
+
+        block_id = p.createMultiBody(
+            baseMass=mass,
+            baseCollisionShapeIndex=collision_id,
+            baseVisualShapeIndex=visual_id,
+            basePosition=position,
+            baseOrientation=orientation,
+            # --- Link Parameters for the Triangle ---
+            linkMasses=[0],  # Massless link
+            linkCollisionShapeIndices=[-1],  # No collision for the link
+            linkVisualShapeIndices=[triangle_visual_id
+                                    ],  # Visual shape for the link
+            # Position the link's origin on top of the block's base
+            linkPositions=[[0, 0, half_extents[2] + 0.001]],
+            linkOrientations=[[0, 0, 0, 1]],  # No relative rotation
+            linkInertialFramePositions=[[0, 0, 0]],
+            linkInertialFrameOrientations=[[0, 0, 0, 1]],
+            linkParentIndices=[0],  # Link is attached to the base (index 0)
+            linkJointTypes=[p.JOINT_FIXED],  # Link is fixed to the base
+            linkJointAxis=[[0, 0,
+                            1]],  # Axis for the joint (not relevant for fixed)
+            physicsClientId=physics_client_id)
+
+        # Re-apply dynamics to the new multi-body object
+        p.changeDynamics(
+            block_id,
+            linkIndex=-1,  # -1 for the base
+            lateralFriction=friction,
+            spinningFriction=friction,
+            physicsClientId=physics_client_id)
+
     return block_id
+
+
+def create_pybullet_sphere(
+    color: Tuple[float, float, float, float],
+    radius: float,
+    mass: float,
+    friction: float,
+    position: Pose3D = (0.0, 0.0, 0.0),
+    orientation: Quaternion = (0.0, 0.0, 0.0, 1.0),
+    physics_client_id: int = 0,
+) -> int:
+    """A generic utility for creating a new sphere.
+
+    Returns the PyBullet ID of the newly created sphere.
+    """
+    # Create the collision shape.
+    collision_id = p.createCollisionShape(p.GEOM_SPHERE,
+                                          radius=radius,
+                                          physicsClientId=physics_client_id)
+
+    # Create the visual shape.
+    visual_id = p.createVisualShape(p.GEOM_SPHERE,
+                                    radius=radius,
+                                    rgbaColor=color,
+                                    physicsClientId=physics_client_id)
+
+    # Create the body.
+    sphere_id = p.createMultiBody(baseMass=mass,
+                                  baseCollisionShapeIndex=collision_id,
+                                  baseVisualShapeIndex=visual_id,
+                                  basePosition=position,
+                                  baseOrientation=orientation,
+                                  physicsClientId=physics_client_id)
+    p.changeDynamics(
+        sphere_id,
+        linkIndex=-1,  # -1 for the base
+        lateralFriction=friction,
+        spinningFriction=friction,
+        physicsClientId=physics_client_id)
+
+    return sphere_id

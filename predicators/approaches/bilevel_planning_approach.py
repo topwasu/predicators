@@ -66,8 +66,11 @@ class BilevelPlanningApproach(BaseApproach):
                 task, nsrts, preds, timeout, seed)
             self._last_nsrt_plan = nsrt_plan
             self._last_atoms_seq = atoms_seq
-            policy = utils.nsrt_plan_to_greedy_policy(nsrt_plan, task.goal,
-                                                      self._rng)
+            policy = utils.nsrt_plan_to_greedy_policy(
+                nsrt_plan,
+                task.goal,
+                self._rng,
+                abstract_function=lambda s: utils.abstract(s, preds))
             logging.debug("Current Task Plan:")
             for act in nsrt_plan:
                 logging.debug(act)
@@ -110,7 +113,7 @@ class BilevelPlanningApproach(BaseApproach):
                 self._task_planning_heuristic,
                 self._max_skeletons_optimized,
                 max_horizon=CFG.horizon,
-                allow_noops=CFG.sesame_allow_noops,
+                allow_waits=CFG.sesame_allow_waits,
                 use_visited_state_set=CFG.sesame_use_visited_state_set,
                 **kwargs)
         except PlanningFailure as e:

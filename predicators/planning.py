@@ -17,7 +17,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from itertools import islice
 from typing import Any, Collection, Dict, FrozenSet, Iterator, List, \
-    Optional, Sequence, Set, Tuple
+    Optional, Sequence, Set, Tuple, Union
 
 import numpy as np
 
@@ -25,10 +25,10 @@ from predicators import utils
 from predicators.option_model import _OptionModelBase
 from predicators.refinement_estimators import BaseRefinementEstimator
 from predicators.settings import CFG
-from predicators.structs import NSRT, AbstractPolicy, DefaultState, \
-    DummyOption, GroundAtom, Metrics, Object, OptionSpec, \
+from predicators.structs import NSRT, AbstractPolicy, CausalProcess, \
+    DefaultState, DummyOption, GroundAtom, Metrics, Object, OptionSpec, \
     ParameterizedOption, Predicate, State, STRIPSOperator, Task, Type, \
-    _GroundNSRT, _GroundSTRIPSOperator, _Option
+    _GroundCausalProcess, _GroundNSRT, _GroundSTRIPSOperator, _Option
 from predicators.utils import EnvironmentFailure, _TaskPlanningHeuristic
 
 _NOT_CAUSES_FAILURE = "NotCausesFailure"
@@ -59,7 +59,7 @@ def sesame_plan(
     max_policy_guided_rollout: int = 0,
     refinement_estimator: Optional[BaseRefinementEstimator] = None,
     check_dr_reachable: bool = True,
-    allow_noops: bool = False,
+    allow_waits: bool = False,
     use_visited_state_set: bool = False
 ) -> Tuple[List[_Option], List[_GroundNSRT], Metrics]:
     """Run bilevel planning.
@@ -77,7 +77,7 @@ def sesame_plan(
             task, option_model, nsrts, predicates, types, timeout, seed,
             task_planning_heuristic, max_skeletons_optimized, max_horizon,
             abstract_policy, max_policy_guided_rollout, refinement_estimator,
-            check_dr_reachable, allow_noops, use_visited_state_set)
+            check_dr_reachable, allow_waits, use_visited_state_set)
     if CFG.sesame_task_planner == "fdopt":
         assert abstract_policy is None
         return _sesame_plan_with_fast_downward(task,
@@ -119,11 +119,12 @@ def _sesame_plan_with_astar(
     max_policy_guided_rollout: int = 0,
     refinement_estimator: Optional[BaseRefinementEstimator] = None,
     check_dr_reachable: bool = True,
-    allow_noops: bool = False,
+    allow_waits: bool = False,
     use_visited_state_set: bool = False
 ) -> Tuple[List[_Option], List[_GroundNSRT], Metrics]:
     """The default version of SeSamE, which runs A* to produce skeletons."""
     init_atoms = utils.abstract(task.init, predicates)
+    logging.debug(f"Initial atoms: {init_atoms}")
     objects = list(task.init)
     start_time = time.perf_counter()
     ground_nsrts = sesame_ground_nsrts(task, init_atoms, nsrts, objects,
@@ -142,7 +143,7 @@ def _sesame_plan_with_astar(
         # that we need to do this inside the while True here, because an NSRT
         # that initially has empty effects may later have a _NOT_CAUSES_FAILURE.
         reachable_nsrts = filter_nsrts(task, init_atoms, ground_nsrts,
-                                       check_dr_reachable, allow_noops)
+                                       check_dr_reachable, allow_waits)
         heuristic = utils.create_task_planning_heuristic(
             task_planning_heuristic, init_atoms, task.goal, reachable_nsrts,
             predicates, objects)
@@ -170,6 +171,8 @@ def _sesame_plan_with_astar(
                            key=lambda s: estimator.get_cost(task, *s)))
             refinement_start_time = time.perf_counter()
             for skeleton, atoms_sequence in gen:
+                logging.debug(
+                    f"Found skeleton: {[n.short_str for n in skeleton]}")
                 if CFG.sesame_use_necessary_atoms:
                     atoms_seq = utils.compute_necessary_atoms_seq(
                         skeleton, atoms_sequence, task.goal)
@@ -194,6 +197,9 @@ def _sesame_plan_with_astar(
                     return plan, skeleton, metrics
                 partial_refinements.append((skeleton, plan))
                 if time.perf_counter() - start_time > timeout:
+                    logging.debug("Exiting search due to timeout.")
+                    logging.debug(
+                        f"Partial refinements: {partial_refinements}")
                     raise PlanningTimeout(
                         "Planning timed out in refinement!",
                         info={"partial_refinements": partial_refinements})
@@ -247,13 +253,13 @@ def filter_nsrts(
     init_atoms: Set[GroundAtom],
     ground_nsrts: List[_GroundNSRT],
     check_dr_reachable: bool = True,
-    allow_noops: bool = False,
+    allow_waits: bool = False,
 ) -> List[_GroundNSRT]:
     """Helper function for _sesame_plan_with_astar(); optionally filter out
     NSRTs with empty effects and/or those that are unreachable."""
     nonempty_ground_nsrts = [
         nsrt for nsrt in ground_nsrts
-        if allow_noops or (nsrt.add_effects | nsrt.delete_effects)
+        if allow_waits or (nsrt.add_effects | nsrt.delete_effects)
     ]
     all_reachable_atoms = utils.get_reachable_atoms(nonempty_ground_nsrts,
                                                     init_atoms)
@@ -269,9 +275,10 @@ def filter_nsrts(
 def task_plan_grounding(
     init_atoms: Set[GroundAtom],
     objects: Set[Object],
-    nsrts: Collection[NSRT],
-    allow_noops: bool = False,
-) -> Tuple[List[_GroundNSRT], Set[GroundAtom]]:
+    nsrts: Collection[Union[NSRT, CausalProcess]],
+    allow_waits: bool = False,
+    compute_reachable_atoms: bool = True,
+) -> Tuple[List[Union[_GroundNSRT, _GroundCausalProcess]], Set[GroundAtom]]:
     """Ground all operators for task planning into dummy _GroundNSRTs,
     filtering out ones that are unreachable or have empty effects.
 
@@ -283,15 +290,22 @@ def task_plan_grounding(
     ground_nsrts = []
     for nsrt in sorted(nsrts):
         for ground_nsrt in utils.all_ground_nsrts(nsrt, objects):
-            if allow_noops or (ground_nsrt.add_effects
+            if allow_waits or (ground_nsrt.add_effects
                                | ground_nsrt.delete_effects):
                 ground_nsrts.append(ground_nsrt)
-    reachable_atoms = utils.get_reachable_atoms(ground_nsrts, init_atoms)
-    reachable_nsrts = [
-        nsrt for nsrt in ground_nsrts
-        if nsrt.preconditions.issubset(reachable_atoms)
-    ]
-    return reachable_nsrts, reachable_atoms
+    if compute_reachable_atoms:
+        reachable_atoms = utils.get_reachable_atoms(ground_nsrts, init_atoms)
+    else:
+        reachable_atoms = set()
+
+    if CFG.planning_filter_unreachable_nsrt:
+        reachable_nsrts = [
+            nsrt for nsrt in ground_nsrts
+            if nsrt.preconditions.issubset(reachable_atoms)
+        ]
+    else:
+        reachable_nsrts = ground_nsrts
+    return reachable_nsrts, reachable_atoms  # type: ignore[return-value]
 
 
 def task_plan(
@@ -460,12 +474,14 @@ def _skeleton_generator(
             # Generate primitive successors.
             for nsrt in utils.get_applicable_operators(ground_nsrts,
                                                        node.atoms):
-                child_atoms = utils.apply_operator(nsrt, set(node.atoms))
+                child_atoms = utils.apply_operator(nsrt, set(
+                    node.atoms))  # type: ignore[type-var]
                 if use_visited_state_set:
                     frozen_atoms = frozenset(child_atoms)
                     if frozen_atoms in visited_atom_sets:
                         continue
-                child_skeleton = node.skeleton + [nsrt]
+                child_skeleton = node.skeleton + [nsrt
+                                                  ]  # type: ignore[list-item]
                 child_skeleton_tup = tuple(child_skeleton)
                 if child_skeleton_tup in visited_skeletons:  # pragma: no cover
                     continue
@@ -543,6 +559,7 @@ def run_low_level_search(
     plan_found = False
     while cur_idx < len(skeleton):
         if time.perf_counter() - start_time > timeout:
+            logging.debug("Exiting low-level search due to timeout.")
             return longest_failed_refinement, False
         assert num_tries[cur_idx] < max_tries[cur_idx]
         try_start_time = time.perf_counter()
@@ -562,9 +579,11 @@ def run_low_level_search(
         cur_idx += 1
         if option.initiable(state):
             try:
+                logging.info(f"Running option {option}")
                 next_state, num_actions = \
                     option_model.get_next_state_and_num_actions(state, option)
             except EnvironmentFailure as e:
+                logging.debug(f"Discovered a failure: {e}")
                 can_continue_on = False
                 # Remember only the most recent failure.
                 discovered_failures[cur_idx - 1] = _DiscoveredFailure(e, nsrt)
@@ -585,12 +604,20 @@ def run_low_level_search(
                             static_obj_changed = True
                             break
                 if static_obj_changed:
+                    logging.debug("Cannot continue: static object changed.")
                     can_continue_on = False
-                # Check if we have exceeded the horizon.
+                # Check if we have exceeded the horizon in total.
                 elif np.sum(num_actions_per_option[:cur_idx]) > max_horizon:
+                    logging.debug("Cannot continue: exceeded total horizon.")
+                    can_continue_on = False
+                # Check if we have exceeded the horizon individually.
+                elif num_actions >= CFG.max_num_steps_option_rollout:
+                    logging.debug("Cannot continue: exceeded individual "
+                                  "horizon.")
                     can_continue_on = False
                 # Check if the option was effectively a noop.
                 elif num_actions == 0:
+                    logging.debug("Cannot continue: an noop")
                     can_continue_on = False
                 elif CFG.sesame_check_expected_atoms:
                     # Check atoms against expected atoms_sequence constraint.
@@ -611,6 +638,8 @@ def run_low_level_search(
                         if cur_idx == len(skeleton):
                             plan_found = True
                     else:
+                        logging.debug("Cannot continue: expected atoms not "
+                                      "hold.")
                         can_continue_on = False
                 else:
                     # If we're not checking expected_atoms, we need to
@@ -623,6 +652,7 @@ def run_low_level_search(
                             can_continue_on = False
         else:
             # The option is not initiable.
+            logging.debug("Cannot continue: option not initiable.")
             can_continue_on = False
         if refinement_time is not None:
             try_end_time = time.perf_counter()
@@ -668,6 +698,7 @@ def run_low_level_search(
                                     longest_failed_refinement
                                 })
                     return longest_failed_refinement, False
+        logging.debug("Option succeed!")
     # Should only get here if the skeleton was empty.
     assert not skeleton
     return [], True
@@ -900,10 +931,10 @@ def task_plan_with_option_plan_constraint(
     ground_nsrts, _ = task_plan_grounding(init_atoms,
                                           objects,
                                           dummy_nsrts,
-                                          allow_noops=True)
+                                          allow_waits=True)
     heuristic = utils.create_task_planning_heuristic(
         CFG.sesame_task_planning_heuristic, init_atoms, goal, ground_nsrts,
-        predicates, objects)
+        predicates, objects)  # type: ignore[type-var]
 
     def _check_goal(
             searchnode_state: Tuple[FrozenSet[GroundAtom], int]) -> bool:
@@ -921,26 +952,30 @@ def task_plan_with_option_plan_constraint(
 
         gt_param_option = option_plan[idx_into_traj][0]
         gt_objects = option_plan[idx_into_traj][1]
-        for applicable_nsrt in utils.get_applicable_operators(
+        for applicable_nsrt in utils.get_applicable_operators(  # type: ignore[type-var]
                 ground_nsrts, atoms):
             # NOTE: we check that the ParameterizedOptions are equal before
             # attempting to ground because otherwise, we might
             # get a parameter mismatch and trigger an AssertionError
             # during grounding.
-            if applicable_nsrt.option != gt_param_option:
+            if applicable_nsrt.option != gt_param_option:  # type: ignore[attr-defined]
                 continue
-            if applicable_nsrt.option_objs != gt_objects:
+            if applicable_nsrt.option_objs != gt_objects:  # type: ignore[attr-defined]
                 continue
             if atoms_seq is not None and not \
-                applicable_nsrt.preconditions.issubset(
+                applicable_nsrt.preconditions.issubset(  # type: ignore[attr-defined]
                     atoms_seq[idx_into_traj]):
                 continue
-            next_atoms = utils.apply_operator(applicable_nsrt, set(atoms))
+            next_atoms = utils.apply_operator(
+                applicable_nsrt, set(atoms))  # type: ignore[type-var]
             # The returned cost is uniform because we don't
             # actually care about finding the shortest path;
             # just one that matches!
-            yield (applicable_nsrt, (frozenset(next_atoms), idx_into_traj + 1),
-                   1.0)
+            yield (
+                applicable_nsrt,
+                (frozenset(next_atoms),
+                 idx_into_traj + 1),  # type: ignore[misc]
+                1.0)
 
     init_atoms_frozen = frozenset(init_atoms)
     init_searchnode_state = (init_atoms_frozen, 0)
@@ -1204,20 +1239,21 @@ def run_task_plan_once(
         assert task_planning_heuristic is not None
         heuristic = utils.create_task_planning_heuristic(
             task_planning_heuristic, init_atoms, goal, ground_nsrts, preds,
-            objects)
+            objects)  # type: ignore[type-var]
         duration = time.perf_counter() - start_time
         timeout -= duration
         plan, atoms_seq, metrics = next(
-            task_plan(init_atoms,
-                      goal,
-                      ground_nsrts,
-                      reachable_atoms,
-                      heuristic,
-                      seed,
-                      timeout,
-                      max_skeletons_optimized=1,
-                      use_visited_state_set=True,
-                      **kwargs))
+            task_plan(
+                init_atoms,
+                goal,
+                ground_nsrts,  # type: ignore[arg-type]
+                reachable_atoms,
+                heuristic,
+                seed,
+                timeout,
+                max_skeletons_optimized=1,
+                use_visited_state_set=True,
+                **kwargs))
         if len(plan) > max_horizon:
             raise PlanningFailure(
                 "Skeleton produced by A-star exceeds horizon!")

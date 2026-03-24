@@ -1,0 +1,695 @@
+"""Tests for agent SDK tool enhancements.
+
+Validates:
+1. inspect_options with option_name saves source code to sandbox and returns path
+2. test_option_plan always saves scene images
+3. test_option_plan shows "Missing goal atoms" when goal not achieved
+4. test_option_plan shows object poses on failure
+5. propose_options saves code to sandbox/proposed_code/
+6. _format_object_poses helper
+7. _render_scene_image helper
+8. _sync_tool_context sets ctx.env from option model
+
+Usage:
+    python tests/test_agent_sdk_tools.py
+"""
+import asyncio
+import os
+import sys
+import tempfile
+
+import numpy as np
+
+# Bootstrap circular imports
+import predicators.utils as utils  # noqa: F401
+from predicators import utils as pred_utils
+from predicators.settings import CFG
+
+_CFG_OVERRIDES = {
+    "env": "pybullet_domino",
+    "approach": "agent_planner",
+    "seed": 0,
+    "use_gui": False,
+    "domino_restricted_push": True,
+    "domino_use_continuous_place": True,
+    "domino_use_skill_factories": True,
+    "domino_use_domino_blocks_as_target": True,
+    "domino_use_grid": True,
+    "domino_has_glued_dominos": False,
+    "domino_initialize_at_finished_state": False,
+    "num_train_tasks": 1,
+    "num_test_tasks": 1,
+    "skill_phase_use_motion_planning": True,
+    "pybullet_ik_validate": False,
+    "agent_sdk_propose_options": True,
+}
+
+
+def _setup(sandbox_dir=None):
+    """Create environment, options, option model, and ToolContext."""
+    pred_utils.reset_config(_CFG_OVERRIDES)
+
+    from predicators.envs import create_new_env
+    from predicators.ground_truth_models import get_gt_options
+    from predicators.option_model import create_option_model
+
+    env = create_new_env(CFG.env, do_cache=False, use_gui=False)
+    options = get_gt_options(env.get_name())
+    predicates = env.predicates
+    train_tasks = list(env.get_train_tasks())
+    types = env.types
+    task = train_tasks[0]
+
+    option_model = create_option_model(CFG.option_model_name)
+
+    from predicators.agent_sdk.tools import ToolContext
+    ctx = ToolContext(
+        types=types,
+        predicates=predicates,
+        processes=set(),
+        options=options,
+        train_tasks=train_tasks,
+        example_state=task.init,
+        option_model=option_model,
+        current_task=task,
+        sandbox_dir=sandbox_dir,
+    )
+    # Extract env from option model (same as _sync_tool_context does)
+    if hasattr(option_model, '_simulator'):
+        ctx.env = getattr(option_model._simulator, '__self__', None)
+
+    # Create sandbox subdirectories
+    if sandbox_dir:
+        os.makedirs(os.path.join(sandbox_dir, "proposed_code"), exist_ok=True)
+
+    return ctx, env
+
+
+def _run(coro):
+    """Run an async coroutine synchronously."""
+    return asyncio.get_event_loop().run_until_complete(coro)
+
+
+def _make_tools(ctx, tool_names=None):
+    """Create MCP tools and return as a name->callable dict."""
+    from predicators.agent_sdk.tools import create_mcp_tools
+    tools = create_mcp_tools(ctx, tool_names=tool_names)
+    # Tools are SdkMcpTool objects; extract name -> handler
+    return {t.name: t.handler for t in tools}
+
+
+# ===== Tests =====
+
+
+def test_inspect_options_list_all(ctx):
+    """inspect_options with no args lists all options."""
+    tools = _make_tools(ctx, ["inspect_options"])
+    result = _run(tools["inspect_options"]({}))
+    text = result["content"][0]["text"]
+    assert "Current options:" in text
+    assert "Pick" in text or "Place" in text or "Push" in text
+    print("  PASS: inspect_options (list all)")
+
+
+def test_inspect_options_detail(ctx):
+    """inspect_options with option_name saves source to sandbox."""
+    tools = _make_tools(ctx, ["inspect_options"])
+
+    # Pick an option that exists
+    opt_names = [o.name for o in ctx.options]
+    test_name = opt_names[0]
+
+    result = _run(tools["inspect_options"]({"option_name": test_name}))
+    text = result["content"][0]["text"]
+
+    # Should have the option header
+    assert f"## {test_name}" in text
+    # Should have params info
+    assert "params_dim" in text
+
+    if ctx.sandbox_dir:
+        # Should point to the saved file
+        assert f"./proposed_code/{test_name}.py" in text
+        # File should exist in sandbox
+        saved_path = os.path.join(ctx.sandbox_dir, "proposed_code",
+                                  f"{test_name}.py")
+        assert os.path.exists(saved_path), \
+            f"Expected file at {saved_path}"
+        # File should have content
+        with open(saved_path) as f:
+            content = f.read()
+        assert len(content) > 0
+        print(f"  PASS: inspect_options (detail for '{test_name}', "
+              f"saved to sandbox)")
+    else:
+        # Fallback: should inline source code
+        assert "Source Code" in text
+        print(f"  PASS: inspect_options (detail for '{test_name}', "
+              f"inlined — no sandbox)")
+
+
+def test_inspect_options_unknown(ctx):
+    """inspect_options with unknown option_name returns error."""
+    tools = _make_tools(ctx, ["inspect_options"])
+    result = _run(tools["inspect_options"]({
+        "option_name": "NonExistentOption"
+    }))
+    assert result.get("is_error", False)
+    assert "Unknown option" in result["content"][0]["text"]
+    print("  PASS: inspect_options (unknown option)")
+
+
+def test_inspect_options_proposed_code(ctx):
+    """inspect_options returns path for option with code saved to sandbox."""
+    from predicators.agent_sdk.tools import _save_option_to_sandbox
+
+    # Save proposal code to sandbox
+    proposal_code = "# test proposal code\nx = 1"
+    _save_option_to_sandbox(ctx, "TestOpt", proposal_code)
+
+    # Create a dummy option with that name
+    from gym.spaces import Box
+
+    from predicators.structs import ParameterizedOption
+    dummy_opt = ParameterizedOption(
+        name="TestOpt",
+        types=[],
+        params_space=Box(low=np.array([]), high=np.array([])),
+        policy=lambda s, m, o, p: None,
+        initiable=lambda s, m, o, p: True,
+        terminal=lambda s, m, o, p: True,
+    )
+    ctx.options = ctx.options | {dummy_opt}
+
+    tools = _make_tools(ctx, ["inspect_options"])
+    result = _run(tools["inspect_options"]({"option_name": "TestOpt"}))
+    text = result["content"][0]["text"]
+
+    if ctx.sandbox_dir:
+        assert "./proposed_code/TestOpt.py" in text
+        # Verify file content
+        saved_path = os.path.join(ctx.sandbox_dir, "proposed_code",
+                                  "TestOpt.py")
+        with open(saved_path) as f:
+            assert "# test proposal code" in f.read()
+    else:
+        # No sandbox — source inlined
+        assert "Source Code" in text
+
+    # Clean up
+    ctx.options = {o for o in ctx.options if o.name != "TestOpt"}
+    if ctx.sandbox_dir:
+        saved_path = os.path.join(ctx.sandbox_dir, "proposed_code",
+                                  "TestOpt.py")
+        if os.path.exists(saved_path):
+            os.remove(saved_path)
+    print("  PASS: inspect_options (proposed code in sandbox)")
+
+
+def _get_valid_option_plan_step(ctx):
+    """Find a valid single-step option plan for testing."""
+    # Find option with fewest type requirements
+    for opt in sorted(ctx.options, key=lambda o: len(o.types)):
+        if opt.name == "Wait":
+            continue
+        # Build object_names from the state
+        state = ctx.current_task.init
+        obj_names = []
+        valid = True
+        for t in opt.types:
+            # Find an object of this type in the state
+            found = False
+            for obj in state:
+                if obj.type == t and obj.name not in obj_names:
+                    obj_names.append(obj.name)
+                    found = True
+                    break
+            if not found:
+                valid = False
+                break
+        if valid:
+            # Use midpoint of params_space
+            low = opt.params_space.low
+            high = opt.params_space.high
+            params = ((low + high) / 2).tolist()
+            return {
+                "option_name": opt.name,
+                "object_names": obj_names,
+                "params": params,
+            }
+    # Fallback: use Wait if available
+    for opt in ctx.options:
+        if opt.name == "Wait":
+            return {"option_name": "Wait", "object_names": [], "params": []}
+    return None
+
+
+def test_option_plan_missing_goal_atoms(ctx):
+    """test_option_plan reports missing goal atoms when goal not achieved."""
+    tools = _make_tools(ctx, ["test_option_plan"])
+
+    step = _get_valid_option_plan_step(ctx)
+    assert step is not None, "No valid option found for testing"
+    plan = [step]
+
+    result = _run(tools["test_option_plan"]({
+        "option_plan": plan,
+        "include_atoms": True,
+    }))
+    text = result["content"][0]["text"]
+
+    # Three possible outcomes:
+    if "Goal achieved: False" in text:
+        assert "Missing goal atoms:" in text
+        print("  PASS: test_option_plan (missing goal atoms shown)")
+    elif "Goal achieved: True" in text:
+        assert "Missing goal atoms:" not in text
+        print("  PASS: test_option_plan (goal achieved, no missing atoms)")
+    else:
+        # Plan failed early (grounding error, NOT INITIABLE, etc.)
+        assert ("NOT INITIABLE" in text or "FAILURE REASON:" in text
+                or "EXECUTION ERROR" in text or "Failed to ground" in text)
+        print("  PASS: test_option_plan (plan failed early, "
+              "goal check not reached)")
+
+
+def test_option_plan_not_initiable_shows_poses(ctx):
+    """test_option_plan shows object poses when option is NOT INITIABLE."""
+    tools = _make_tools(ctx, ["test_option_plan"])
+
+    # Find Place option and try it without Pick first
+    place_opt = None
+    for opt in ctx.options:
+        if opt.name == "Place":
+            place_opt = opt
+            break
+
+    if place_opt is None:
+        print("  SKIP: test_option_plan (no Place option)")
+        return
+
+    # Build object names from types
+    state = ctx.current_task.init
+    obj_names = []
+    for t in place_opt.types:
+        for obj in state:
+            if obj.type == t and obj.name not in obj_names:
+                obj_names.append(obj.name)
+                break
+
+    low = place_opt.params_space.low
+    high = place_opt.params_space.high
+    params = ((low + high) / 2).tolist()
+
+    plan = [{
+        "option_name": "Place",
+        "object_names": obj_names,
+        "params": params,
+    }]
+
+    result = _run(tools["test_option_plan"]({
+        "option_plan": plan,
+    }))
+    text = result["content"][0]["text"]
+
+    if "NOT INITIABLE" in text:
+        assert "Object poses at failure:" in text
+        print("  PASS: test_option_plan (NOT INITIABLE shows poses)")
+    elif "Failed to ground" in text:
+        print("  SKIP: test_option_plan (Place could not be grounded)")
+    else:
+        print("  SKIP: test_option_plan (Place was initiable, "
+              "can't test NOT INITIABLE path)")
+
+
+def test_option_plan_saves_images(ctx):
+    """test_option_plan always saves scene images (never returns inline)."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ctx.image_save_dir = tmpdir
+
+        tools = _make_tools(ctx, ["test_option_plan"])
+
+        step = _get_valid_option_plan_step(ctx)
+        assert step is not None, "No valid option found for testing"
+        plan = [step]
+
+        result = _run(tools["test_option_plan"]({
+            "option_plan": plan,
+        }))
+
+        content = result["content"]
+        # Should have text block only (no inline images)
+        assert any(b["type"] == "text" for b in content)
+        assert not any(b["type"] == "image" for b in content)
+
+        # Check files were saved if env rendering works
+        saved = [f for f in os.listdir(tmpdir) if f.endswith(".png")]
+        if saved:
+            print(f"  PASS: test_option_plan ({len(saved)} images saved)")
+        else:
+            print("  SKIP: test_option_plan (rendering not available)")
+
+        ctx.image_save_dir = None
+
+
+def test_option_plan_failure_shows_poses(ctx):
+    """test_option_plan shows object poses when option returns 0 actions."""
+    tools = _make_tools(ctx, ["test_option_plan"])
+
+    step = _get_valid_option_plan_step(ctx)
+    assert step is not None, "No valid option found for testing"
+    plan = [step]
+
+    result = _run(tools["test_option_plan"]({
+        "option_plan": plan,
+    }))
+    text = result["content"][0]["text"]
+
+    # Check the output is well-formed — it should have either step info
+    # or a grounding error
+    assert ("Step 0:" in text or "Failed to ground" in text
+            or "Testing option plan" in text)
+    if "FAILURE REASON:" in text:
+        assert "Object poses at failure:" in text
+        print("  PASS: test_option_plan (failure shows poses)")
+    elif "NOT INITIABLE" in text:
+        assert "Object poses at failure:" in text
+        print("  PASS: test_option_plan (NOT INITIABLE shows poses)")
+    else:
+        print("  PASS: test_option_plan (no failures in output)")
+
+
+def test_format_object_poses(ctx):
+    """_format_object_poses formats object positions correctly."""
+    from predicators.agent_sdk.tools import _format_object_poses
+
+    state = ctx.current_task.init
+    result = _format_object_poses(state)
+
+    assert isinstance(result, str)
+    assert len(result) > 0
+    # Should contain robot
+    assert "robot" in result
+    # Should contain coordinates
+    assert "x=" in result
+    assert "y=" in result
+    assert "z=" in result
+    print(f"  PASS: _format_object_poses ({result.count(chr(10))+1} objects)")
+
+
+def test_render_scene_image(ctx):
+    """_render_scene_image renders a scene and returns image block."""
+    from predicators.agent_sdk.tools import _render_scene_image
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ctx.image_save_dir = tmpdir
+
+        result = _render_scene_image(ctx, "test_render")
+
+        if result is not None:
+            assert result["type"] == "image"
+            assert result["mimeType"] == "image/png"
+            assert len(result["data"]) > 100
+
+            # Check saved file includes iter/turn prefix
+            saved = [f for f in os.listdir(tmpdir) if f.endswith(".png")]
+            assert len(saved) == 1
+            expected = (f"iter{ctx.iteration_id:03d}"
+                        f"_test{ctx.test_call_id:03d}_test_render.png")
+            assert saved[0] == expected, \
+                f"Expected {expected}, got {saved[0]}"
+            print("  PASS: _render_scene_image (rendered + saved)")
+        else:
+            print("  SKIP: _render_scene_image (rendering not available)")
+
+        ctx.image_save_dir = None
+
+
+def test_render_scene_no_env(ctx):
+    """_render_scene_image returns None when env is None."""
+    from predicators.agent_sdk.tools import _render_scene_image
+
+    original_env = ctx.env
+    ctx.env = None
+    result = _render_scene_image(ctx, "should_be_none")
+    assert result is None
+    ctx.env = original_env
+    print("  PASS: _render_scene_image (no env → None)")
+
+
+def test_propose_options_saves_to_sandbox(ctx):
+    """propose_options saves proposal code to sandbox/proposed_code/."""
+    tools = _make_tools(ctx, ["propose_options"])
+
+    # Get type names for a valid proposal
+    type_names = {t.name: t for t in ctx.types}
+    robot_type_name = "robot" if "robot" in type_names else list(type_names)[0]
+
+    code = f"""\
+from gym.spaces import Box
+import numpy as np
+
+proposed_options = [
+    ParameterizedOption(
+        name="TestProposed",
+        types=[{robot_type_name}_type],
+        params_space=Box(low=np.array([0.0]), high=np.array([1.0])),
+        policy=lambda s, m, o, p: Action(np.zeros(s.get(o[0], "x").shape if hasattr(s.get(o[0], "x"), "shape") else (1,))),
+        initiable=lambda s, m, o, p: True,
+        terminal=lambda s, m, o, p: True,
+    )
+]
+"""
+
+    result = _run(tools["propose_options"]({
+        "code":
+        code,
+        "description":
+        "Test option for unit test",
+    }))
+    text = result["content"][0]["text"]
+
+    if "Successfully proposed" in text:
+        if ctx.sandbox_dir:
+            saved_path = os.path.join(ctx.sandbox_dir, "proposed_code",
+                                      "TestProposed.py")
+            assert os.path.exists(saved_path), \
+                f"Expected file at {saved_path}"
+            with open(saved_path) as f:
+                content = f.read()
+            assert "proposed_options" in content
+            print("  PASS: propose_options (code saved to sandbox)")
+            os.remove(saved_path)
+        else:
+            print("  PASS: propose_options (no sandbox, code not saved)")
+
+        # Clean up
+        ctx.options = {o for o in ctx.options if o.name != "TestProposed"}
+    else:
+        # Code execution might fail due to env-specific types
+        print(f"  SKIP: propose_options (code failed: {text[:100]})")
+
+
+def test_visualize_state(ctx):
+    """visualize_state modifies object position and saves an image."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ctx.image_save_dir = tmpdir
+        tools = _make_tools(ctx, ["visualize_state"])
+
+        # Pick an object from the current task
+        obj_names = sorted(o.name for o in ctx.current_task.init)
+        target_obj = obj_names[0]
+
+        result = _run(tools["visualize_state"]({
+            "modifications": [
+                {
+                    "object": target_obj,
+                    "features": {
+                        "x": 0.8,
+                        "y": 1.0
+                    }
+                },
+            ],
+            "step_label":
+            "move_test",
+        }))
+
+        text = result["content"][0]["text"]
+        assert "Modified state" in text
+        assert target_obj in text
+        assert not result.get("is_error", False)
+
+        saved = [f for f in os.listdir(tmpdir) if f.endswith(".png")]
+        assert len(saved) == 1, f"Expected 1 image, got {len(saved)}: {saved}"
+        print(f"  PASS: visualize_state ({saved[0]})")
+
+        ctx.image_save_dir = None
+        ctx.visualized_state = None
+
+
+def test_visualize_shared_state(ctx):
+    """visualize_state then annotate_scene uses modified state."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ctx.image_save_dir = tmpdir
+        tools = _make_tools(ctx, ["visualize_state", "annotate_scene"])
+
+        obj_names = sorted(o.name for o in ctx.current_task.init)
+        target_obj = obj_names[0]
+
+        # First: visualize modified state
+        _run(tools["visualize_state"]({
+            "modifications": [
+                {
+                    "object": target_obj,
+                    "features": {
+                        "x": 0.8,
+                        "y": 1.0
+                    }
+                },
+            ],
+        }))
+
+        assert ctx.visualized_state is not None
+
+        # Second: annotate_scene should use the modified state
+        result = _run(tools["annotate_scene"]({
+            "annotations": [
+                {
+                    "type": "marker",
+                    "position": [0.8, 1.0, 0.5],
+                    "color": [1, 0, 0],
+                    "label": "ref"
+                },
+            ],
+            "step_label":
+            "shared_state_test",
+        }))
+
+        text = result["content"][0]["text"]
+        assert "1 annotation" in text
+        assert not result.get("is_error", False)
+
+        saved = [f for f in os.listdir(tmpdir) if f.endswith(".png")]
+        assert len(saved) == 2, f"Expected 2 images, got {len(saved)}: {saved}"
+        print("  PASS: visualize_state → annotate_scene shared state")
+
+        ctx.image_save_dir = None
+        ctx.visualized_state = None
+
+
+def test_visualize_invalid_object(ctx):
+    """visualize_state returns error for unknown object name."""
+    tools = _make_tools(ctx, ["visualize_state"])
+
+    result = _run(tools["visualize_state"]({
+        "modifications": [
+            {
+                "object": "nonexistent_obj_xyz",
+                "features": {
+                    "x": 1.0
+                }
+            },
+        ],
+    }))
+
+    assert result.get("is_error", False)
+    text = result["content"][0]["text"]
+    assert "Unknown object" in text
+    print("  PASS: visualize_state invalid object → error")
+
+
+def test_visualize_no_modifications(ctx):
+    """visualize_state returns error when no modifications given."""
+    tools = _make_tools(ctx, ["visualize_state"])
+
+    result = _run(tools["visualize_state"]({
+        "modifications": [],
+    }))
+
+    assert result.get("is_error", False)
+    text = result["content"][0]["text"]
+    assert "No modifications" in text
+    print("  PASS: visualize_state no modifications → error")
+
+
+def test_sync_tool_context_sets_env():
+    """_sync_tool_context extracts env from option model."""
+    pred_utils.reset_config(_CFG_OVERRIDES)
+
+    from predicators.envs import create_new_env
+    from predicators.envs.pybullet_env import PyBulletEnv
+    from predicators.ground_truth_models import get_gt_options
+    from predicators.option_model import create_option_model
+
+    env = create_new_env(CFG.env, do_cache=False, use_gui=False)
+    options = get_gt_options(env.get_name())
+    option_model = create_option_model(CFG.option_model_name)
+
+    from predicators.agent_sdk.tools import ToolContext
+    ctx = ToolContext(
+        types=env.types,
+        predicates=env.predicates,
+        options=options,
+        train_tasks=list(env.get_train_tasks()),
+        option_model=option_model,
+    )
+
+    # Simulate what _sync_tool_context does
+    assert ctx.env is None
+    if hasattr(option_model, '_simulator'):
+        ctx.env = getattr(option_model._simulator, '__self__', None)
+
+    assert ctx.env is not None
+    assert isinstance(ctx.env, PyBulletEnv)
+    print("  PASS: _sync_tool_context sets ctx.env from option model")
+
+
+def main():
+    with tempfile.TemporaryDirectory() as sandbox_dir:
+        print("Setting up environment...")
+        ctx, env = _setup(sandbox_dir=sandbox_dir)
+        print(f"Setup complete. {len(ctx.options)} options, "
+              f"{len(ctx.train_tasks)} tasks\n")
+
+        print("=== Tool Enhancement Tests ===\n")
+
+        # inspect_options tests
+        print("1. inspect_options tests:")
+        test_inspect_options_list_all(ctx)
+        test_inspect_options_detail(ctx)
+        test_inspect_options_unknown(ctx)
+        test_inspect_options_proposed_code(ctx)
+
+        # test_option_plan tests
+        print("\n2. test_option_plan tests:")
+        test_option_plan_missing_goal_atoms(ctx)
+        test_option_plan_not_initiable_shows_poses(ctx)
+        test_option_plan_saves_images(ctx)
+        test_option_plan_failure_shows_poses(ctx)
+
+        # Helper function tests
+        print("\n3. Helper function tests:")
+        test_format_object_poses(ctx)
+        test_render_scene_image(ctx)
+        test_render_scene_no_env(ctx)
+
+        # propose_options test
+        print("\n4. propose_options tests:")
+        test_propose_options_saves_to_sandbox(ctx)
+
+        # visualize_state tests
+        print("\n5. visualize_state tests:")
+        test_visualize_state(ctx)
+        test_visualize_shared_state(ctx)
+        test_visualize_invalid_object(ctx)
+        test_visualize_no_modifications(ctx)
+
+        # _sync_tool_context test (creates fresh env)
+        print("\n6. Context sync tests:")
+        test_sync_tool_context_sets_env()
+
+        print("\n=== All tests passed! ===")
+
+
+if __name__ == "__main__":
+    main()

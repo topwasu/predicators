@@ -1072,7 +1072,7 @@ def test_lifted_decision_lists():
 
     # Test string representation of rules with no preconditions and with
     # multiple goals.
-    noop_nsrt = NSRT("Noop",
+    wait_nsrt = NSRT("Noop",
                      parameters=[],
                      preconditions=set(),
                      add_effects=set(),
@@ -1088,7 +1088,7 @@ def test_lifted_decision_lists():
         neg_state_preconditions=set(),
         goal_preconditions={on([cup_var, plate_var]),
                             hand_empty([robot_var])},
-        nsrt=noop_nsrt)
+        nsrt=wait_nsrt)
     assert str(noop_rule) == """(:rule MyNoopRule
     :parameters (?cup - cup_type ?plate - plate_type ?robot - robot_type)
     :preconditions ()

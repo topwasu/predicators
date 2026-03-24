@@ -8,8 +8,8 @@ from gym.spaces import Box
 from predicators import utils
 from predicators.envs import BaseEnv, get_or_create_env
 from predicators.settings import CFG
-from predicators.structs import NSRT, LiftedDecisionList, \
-    ParameterizedOption, Predicate, Type
+from predicators.structs import NSRT, CausalProcess, EndogenousProcess, \
+    LiftedDecisionList, ParameterizedOption, Predicate, Task, Type
 
 
 class GroundTruthOptionFactory(abc.ABC):
@@ -48,6 +48,26 @@ class GroundTruthNSRTFactory(abc.ABC):
         raise NotImplementedError("Override me!")
 
 
+class GroundTruthProcessFactory(abc.ABC):
+    """Parent class for ground-truth process definitions."""
+
+    @classmethod
+    @abc.abstractmethod
+    def get_env_names(cls) -> Set[str]:
+        """Get the env names that this factory builds processes for."""
+        raise NotImplementedError("Override me!")
+
+    @classmethod
+    @abc.abstractmethod
+    def get_processes(
+            cls, env_name: str, types: Dict[str,
+                                            Type], predicates: Dict[str,
+                                                                    Predicate],
+            options: Dict[str, ParameterizedOption]) -> Set[CausalProcess]:
+        """Create processes for the given env name."""
+        raise NotImplementedError("Override me!")
+
+
 class GroundTruthLDLBridgePolicyFactory(abc.ABC):
     """Ground-truth policies implemented with LDLs saved in text files."""
 
@@ -76,15 +96,69 @@ class GroundTruthLDLBridgePolicyFactory(abc.ABC):
         return utils.parse_ldl_from_str(ldl_str, types, predicates, nsrts)
 
 
+class GroundTruthTypeFactory(abc.ABC):
+    """Parent class for environment-specific helper types."""
+
+    @classmethod
+    @abc.abstractmethod
+    def get_env_names(cls) -> Set[str]:
+        """Get the env names that this factory provides helper types for."""
+        raise NotImplementedError("Override me!")
+
+    @classmethod
+    @abc.abstractmethod
+    def get_helper_types(cls, env_name: str) -> Set[Type]:
+        """Get helper types for the given env name."""
+        raise NotImplementedError("Override me!")
+
+    @classmethod
+    def augment_task_with_helper_objects(cls, task: Task) -> Task:
+        """Augment task's initial state with helper objects and features.
+
+        By default, returns the task unchanged. Override this method to
+        add environment-specific helper objects to the initial state.
+        """
+        return task
+
+
+class GroundTruthPredicateFactory(abc.ABC):
+    """Parent class for environment-specific helper predicates."""
+
+    @classmethod
+    @abc.abstractmethod
+    def get_env_names(cls) -> Set[str]:
+        """Get the env names that this factory provides helper predicates
+        for."""
+        raise NotImplementedError("Override me!")
+
+    @classmethod
+    @abc.abstractmethod
+    def get_helper_predicates(cls, env_name: str,
+                              types: Dict[str, Type]) -> Set[Predicate]:
+        """Get helper predicates for the given env name."""
+        raise NotImplementedError("Override me!")
+
+
+def _normalize_env_name_for_gt(env_name: str) -> str:
+    """Map mara_* env names to pybullet_* so they reuse GT models."""
+    if env_name.startswith("mara_"):
+        return "pybullet_" + env_name[len("mara_"):]
+    return env_name
+
+
 def get_gt_options(env_name: str) -> Set[ParameterizedOption]:
     """Create ground truth options for an env."""
     env = get_or_create_env(env_name)
+    gt_name = _normalize_env_name_for_gt(env_name)
     for cls in utils.get_all_subclasses(GroundTruthOptionFactory):
-        if not cls.__abstractmethods__ and env_name in cls.get_env_names():
+        if not cls.__abstractmethods__ and gt_name in cls.get_env_names():
             factory = cls()
-            types = {t.name: t for t in env.types}
+            # Get environment types and helper types
+            helper_types = get_gt_helper_types(env_name)
+            all_types = env.types | helper_types
+            types = {t.name: t for t in all_types}
             predicates = {p.name: p for p in env.predicates}
-            options = factory.get_options(env_name, types, predicates,
+            options = factory.get_options(gt_name, types, predicates,
                                           env.action_space)
             break
     else:  # pragma: no cover
@@ -103,8 +177,9 @@ def get_gt_nsrts(env_name: str, predicates_to_keep: Set[Predicate],
     env_options = get_gt_options(env_name)
     assert predicates_to_keep.issubset(env.predicates)
     assert options_to_keep.issubset(env_options)
+    gt_name = _normalize_env_name_for_gt(env_name)
     for cls in utils.get_all_subclasses(GroundTruthNSRTFactory):
-        if not cls.__abstractmethods__ and env_name in cls.get_env_names():
+        if not cls.__abstractmethods__ and gt_name in cls.get_env_names():
             factory = cls()
             # Give all predicates and options, then filter based on kept ones
             # at the end of this function. This is easier than filtering within
@@ -112,7 +187,7 @@ def get_gt_nsrts(env_name: str, predicates_to_keep: Set[Predicate],
             types = {t.name: t for t in env.types}
             predicates = {p.name: p for p in env.predicates}
             options = {o.name: o for o in env_options}
-            nsrts = factory.get_nsrts(env_name, types, predicates, options)
+            nsrts = factory.get_nsrts(gt_name, types, predicates, options)
             break
     else:  # pragma: no cover
         raise NotImplementedError("Ground-truth NSRTs not implemented for "
@@ -128,18 +203,114 @@ def get_gt_nsrts(env_name: str, predicates_to_keep: Set[Predicate],
     return final_nsrts
 
 
+def get_gt_processes(env_name: str,
+                     predicates_to_keep: Set[Predicate],
+                     options_to_keep: Set[ParameterizedOption],
+                     only_endogenous: bool = False) -> Set[CausalProcess]:
+    """Create ground truth processes for an env."""
+    env = get_or_create_env(env_name)
+    env_options = get_gt_options(env_name)
+    helper_predicates = get_gt_helper_predicates(env_name)
+    all_predicates = env.predicates | helper_predicates
+    helper_types = get_gt_helper_types(env_name)
+    all_types = env.types | helper_types
+    assert predicates_to_keep.issubset(all_predicates)
+    assert options_to_keep.issubset(env_options)
+    gt_name = _normalize_env_name_for_gt(env_name)
+    for cls in utils.get_all_subclasses(GroundTruthProcessFactory):
+        if not cls.__abstractmethods__ and gt_name in cls.get_env_names():
+            factory = cls()
+            # Give all predicates and options, then filter based on kept ones
+            # at the end of this function. This is easier than filtering within
+            # the factory itself.
+            types = {t.name: t for t in all_types}
+            predicates = {p.name: p for p in all_predicates}
+            options = {o.name: o for o in env_options}
+            processes = factory.get_processes(gt_name, types, predicates,
+                                              options)
+            break
+    else:  # pragma: no cover
+        raise NotImplementedError("Ground-truth processes not implemented for "
+                                  f"env: {env_name}")
+    # Filter out excluded predicates from processes, and filter out processes
+    # options are excluded.
+    final_processes = set()
+    for process in processes:
+        if (isinstance(process, EndogenousProcess)
+                and process.option not in options_to_keep):
+            continue
+        process = process.filter_predicates(predicates_to_keep)
+        final_processes.add(process)
+
+    # Filter out exogenous processes if only_endogenous is True.
+    if only_endogenous:
+        final_processes = {
+            p
+            for p in final_processes if isinstance(p, EndogenousProcess)
+        }
+    return final_processes
+
+
 def get_gt_ldl_bridge_policy(env_name: str, types: Set[Type],
                              predicates: Set[Predicate],
                              options: Set[ParameterizedOption],
                              nsrts: Set[NSRT]) -> LiftedDecisionList:
     """Create a lifted decision list for an oracle bridge policy."""
+    gt_name = _normalize_env_name_for_gt(env_name)
     for cls in utils.get_all_subclasses(GroundTruthLDLBridgePolicyFactory):
-        if not cls.__abstractmethods__ and env_name in cls.get_env_names():
+        if not cls.__abstractmethods__ and gt_name in cls.get_env_names():
             factory = cls()
-            return factory.get_ldl_bridge_policy(env_name, types, predicates,
+            return factory.get_ldl_bridge_policy(gt_name, types, predicates,
                                                  options, nsrts)
     raise NotImplementedError("Ground-truth bridge policy not implemented for "
                               f"env: {env_name}")
+
+
+def get_gt_helper_types(env_name: str) -> Set[Type]:
+    """Get environment-specific helper types if defined.
+
+    Returns an empty set if no helper types are defined for this
+    environment.
+    """
+    gt_name = _normalize_env_name_for_gt(env_name)
+    for cls in utils.get_all_subclasses(GroundTruthTypeFactory):
+        if not cls.__abstractmethods__ and gt_name in cls.get_env_names():
+            factory = cls()
+            return factory.get_helper_types(gt_name)
+    return set()
+
+
+def augment_task_with_helper_objects(task: Task, env_name: str) -> Task:
+    """Augment task with environment-specific helper objects if defined.
+
+    Returns the task unchanged if no helper object augmentation is
+    defined for this environment.
+    """
+    gt_name = _normalize_env_name_for_gt(env_name)
+    for cls in utils.get_all_subclasses(GroundTruthTypeFactory):
+        if not cls.__abstractmethods__ and gt_name in cls.get_env_names():
+            factory = cls()
+            return factory.augment_task_with_helper_objects(task)
+    return task
+
+
+def get_gt_helper_predicates(env_name: str) -> Set[Predicate]:
+    """Get environment-specific helper predicates if defined.
+
+    Returns an empty set if no helper predicates are defined for this
+    environment.
+    """
+    gt_name = _normalize_env_name_for_gt(env_name)
+    for cls in utils.get_all_subclasses(GroundTruthPredicateFactory):
+        if not cls.__abstractmethods__ and gt_name in cls.get_env_names():
+            factory = cls()
+            # Get environment types and helper types
+            env = get_or_create_env(env_name)
+            helper_types = get_gt_helper_types(env_name)
+            all_types = env.types | helper_types
+            types_dict = {t.name: t for t in all_types}
+            return factory.get_helper_predicates(gt_name, types_dict)
+    return set()
 
 
 def parse_config_included_options(env: BaseEnv) -> Set[ParameterizedOption]:

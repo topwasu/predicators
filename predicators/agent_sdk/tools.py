@@ -1257,7 +1257,8 @@ def create_mcp_tools(ctx: ToolContext,
         option_plan_spec = args["option_plan"]
         include_states = args.get("include_states", False)
         include_atoms = args.get("include_atoms", True)
-        save_low_level_action_images = args.get("save_low_level_action_images", False)
+        save_low_level_action_images = args.get("save_low_level_action_images",
+                                                False)
 
         if task_idx is not None:
             if task_idx < 0 or task_idx >= len(ctx.train_tasks):

@@ -20,7 +20,8 @@ import functools
 import logging
 from collections import defaultdict
 from dataclasses import fields
-from typing import Dict, List, Optional, Sequence, Set, Tuple, Type as TypingType
+from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import Type as TypingType
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -43,7 +44,6 @@ from predicators.utils import PyBulletState
 # errors when the package is not installed.
 
 log = logging.getLogger(__name__)
-
 
 # ---------------------------------------------------------------------------
 # Struct converter
@@ -84,7 +84,8 @@ class _StructConverter:
                 name,
                 mara_type.feature_names,  # type: ignore[attr-defined]
                 parent=parent,
-                sim_features=mara_type.sim_features,  # type: ignore[attr-defined]
+                sim_features=mara_type.
+                sim_features,  # type: ignore[attr-defined]
             )
             self._type_cache[name] = pred_type
             self._rev_type_cache[name] = mara_type
@@ -100,10 +101,12 @@ class _StructConverter:
         """Convert a mara-robosim Object to a predicators Object."""
         name: str = mara_obj.name  # type: ignore[attr-defined]
         if name not in self._obj_cache:
-            pred_type = self.convert_type(mara_obj.type)  # type: ignore[attr-defined]
+            pred_type = self.convert_type(
+                mara_obj.type)  # type: ignore[attr-defined]
             pred_obj = PredObject(name, pred_type)
             # Copy sim_data
-            for key, val in mara_obj.sim_data.items():  # type: ignore[attr-defined]
+            for key, val in mara_obj.sim_data.items(
+            ):  # type: ignore[attr-defined]
                 pred_obj.sim_data[key] = val
             self._obj_cache[name] = pred_obj
             self._rev_obj_cache[name] = mara_obj
@@ -118,7 +121,8 @@ class _StructConverter:
     def convert_state(self, mara_state: object) -> PredState:
         """Convert a mara-robosim State to a predicators State."""
         data: Dict[PredObject, np.ndarray] = {}
-        for mara_obj, arr in mara_state.data.items():  # type: ignore[attr-defined]
+        for mara_obj, arr in mara_state.data.items(
+        ):  # type: ignore[attr-defined]
             pred_obj = self.convert_object(mara_obj)
             # Share the numpy array (no copy needed for read-only use).
             data[pred_obj] = arr
@@ -193,7 +197,9 @@ class _StructConverter:
                 # Convert auxiliary predicates.
                 pred_aux = {self.convert_predicate(a) for a in aux}
                 pred_pred = PredDerivedPredicate(
-                    name, pred_types, _wrapped_derived_classifier,
+                    name,
+                    pred_types,
+                    _wrapped_derived_classifier,
                     auxiliary_predicates=pred_aux if pred_aux else None,
                 )
             else:
@@ -214,7 +220,8 @@ class _StructConverter:
                     mara_objs = [_rev_obj[o.name] for o in objects]
                     return _mara_cls(mara_state, mara_objs)
 
-                pred_pred = PredPredicate(name, pred_types, _wrapped_classifier)
+                pred_pred = PredPredicate(name, pred_types,
+                                          _wrapped_classifier)
             self._pred_cache[name] = pred_pred
         return self._pred_cache[name]
 
@@ -222,7 +229,8 @@ class _StructConverter:
 
     def convert_ground_atom(self, mara_atom: object) -> PredGroundAtom:
         """Convert a mara-robosim GroundAtom to a predicators GroundAtom."""
-        pred = self.convert_predicate(mara_atom.predicate)  # type: ignore[attr-defined]
+        pred = self.convert_predicate(
+            mara_atom.predicate)  # type: ignore[attr-defined]
         objs = [
             self.convert_object(o)
             for o in mara_atom.objects  # type: ignore[attr-defined]
@@ -233,7 +241,8 @@ class _StructConverter:
 
     def convert_task(self, mara_task: object) -> PredEnvironmentTask:
         """Convert a mara-robosim EnvironmentTask to predicators."""
-        init_state = self.convert_state(mara_task.init)  # type: ignore[attr-defined]
+        init_state = self.convert_state(
+            mara_task.init)  # type: ignore[attr-defined]
         goal_atoms: Set[PredGroundAtom] = set()
         for mara_atom in mara_task.goal:  # type: ignore[attr-defined]
             goal_atoms.add(self.convert_ground_atom(mara_atom))
@@ -242,9 +251,10 @@ class _StructConverter:
         if mara_alt is not None:
             alt = {self.convert_ground_atom(a) for a in mara_alt}
         goal_nl = getattr(mara_task, "goal_nl", None)
-        return PredEnvironmentTask(
-            init_state, goal_atoms, alt_goal_desc=alt, goal_nl=goal_nl
-        )
+        return PredEnvironmentTask(init_state,
+                                   goal_atoms,
+                                   alt_goal_desc=alt,
+                                   goal_nl=goal_nl)
 
 
 # ---------------------------------------------------------------------------
@@ -315,7 +325,10 @@ class MaraBaseAdapter(BaseEnv):
         return PyBulletConfig(**kwargs)
 
     def _create_mara_env(self, config: object, use_gui: bool) -> object:
-        """Instantiate the mara-robosim env. Must be overridden."""
+        """Instantiate the mara-robosim env.
+
+        Must be overridden.
+        """
         raise NotImplementedError
 
     # -- BaseEnv interface --------------------------------------------------
@@ -385,8 +398,7 @@ class MaraBaseAdapter(BaseEnv):
         caption: Optional[str] = None,
     ) -> matplotlib.figure.Figure:
         raise NotImplementedError(
-            "This mara-robosim adapter does not use Matplotlib rendering."
-        )
+            "This mara-robosim adapter does not use Matplotlib rendering.")
 
     def render(self,
                action: Optional[PredAction] = None,
@@ -475,7 +487,8 @@ class MaraBlocksEnv(MaraBaseAdapter):
         kwargs["num_blocks_train"] = tuple(CFG.blocks_num_blocks_train)
         kwargs["num_blocks_test"] = tuple(CFG.blocks_num_blocks_test)
         kwargs["holding_goals"] = CFG.blocks_holding_goals
-        kwargs["high_towers_are_unstable"] = CFG.blocks_high_towers_are_unstable
+        kwargs[
+            "high_towers_are_unstable"] = CFG.blocks_high_towers_are_unstable
         return BlocksConfig(**kwargs)
 
     def _create_mara_env(self, config: object, use_gui: bool) -> object:
@@ -497,13 +510,15 @@ class MaraBoilEnv(MaraBaseAdapter):
         kwargs = _build_base_config_kwargs()
         kwargs["use_gui"] = use_gui
         kwargs["boil_goal"] = CFG.boil_goal
-        kwargs["boil_goal_simple_human_happy"] = CFG.boil_goal_simple_human_happy
+        kwargs[
+            "boil_goal_simple_human_happy"] = CFG.boil_goal_simple_human_happy
         kwargs["boil_use_derived_predicates"] = CFG.boil_use_derived_predicates
-        kwargs["boil_require_jug_full_to_heatup"] = CFG.boil_require_jug_full_to_heatup
-        kwargs["boil_goal_require_burner_off"] = CFG.boil_goal_require_burner_off
+        kwargs[
+            "boil_require_jug_full_to_heatup"] = CFG.boil_require_jug_full_to_heatup
+        kwargs[
+            "boil_goal_require_burner_off"] = CFG.boil_goal_require_burner_off
         kwargs["boil_add_jug_reached_capacity_predicate"] = (
-            CFG.boil_add_jug_reached_capacity_predicate
-        )
+            CFG.boil_add_jug_reached_capacity_predicate)
         kwargs["boil_num_jugs_train"] = tuple(CFG.boil_num_jugs_train)
         kwargs["boil_num_jugs_test"] = tuple(CFG.boil_num_jugs_test)
         kwargs["boil_num_burner_train"] = tuple(CFG.boil_num_burner_train)
@@ -534,8 +549,7 @@ class MaraCircuitEnv(MaraBaseAdapter):
         kwargs = _build_base_config_kwargs()
         kwargs["use_gui"] = use_gui
         kwargs["circuit_light_doesnt_need_battery"] = (
-            CFG.circuit_light_doesnt_need_battery
-        )
+            CFG.circuit_light_doesnt_need_battery)
         kwargs["circuit_battery_in_box"] = CFG.circuit_battery_in_box
         return CircuitConfig(**kwargs)
 
@@ -565,7 +579,8 @@ class MaraCoffeeEnv(MaraBaseAdapter):
         kwargs["simple_tasks"] = CFG.coffee_simple_tasks
         kwargs["machine_have_light_bar"] = CFG.coffee_machine_have_light_bar
         kwargs["machine_has_plug"] = CFG.coffee_machine_has_plug
-        kwargs["plug_break_after_plugged_in"] = CFG.coffee_plug_break_after_plugged_in
+        kwargs[
+            "plug_break_after_plugged_in"] = CFG.coffee_plug_break_after_plugged_in
         kwargs["fill_jug_gradually"] = CFG.coffee_fill_jug_gradually
         kwargs["render_grid_world"] = CFG.coffee_render_grid_world
         return CoffeeConfig(**kwargs)
@@ -594,8 +609,7 @@ class MaraCoverEnv(MaraBaseAdapter):
         kwargs["cover_target_widths"] = tuple(CFG.cover_target_widths)
         kwargs["cover_initial_holding_prob"] = CFG.cover_initial_holding_prob
         kwargs["cover_blocks_change_color_when_cover"] = (
-            CFG.cover_blocks_change_color_when_cover
-        )
+            CFG.cover_blocks_change_color_when_cover)
         return CoverConfig(**kwargs)
 
     def _create_mara_env(self, config: object, use_gui: bool) -> object:
@@ -618,39 +632,36 @@ class MaraDominoEnv(MaraBaseAdapter):
         kwargs["use_gui"] = use_gui
         kwargs["domino_debug_layout"] = CFG.domino_debug_layout
         kwargs["domino_some_dominoes_are_connected"] = (
-            CFG.domino_some_dominoes_are_connected
-        )
+            CFG.domino_some_dominoes_are_connected)
         kwargs["domino_initialize_at_finished_state"] = (
-            CFG.domino_initialize_at_finished_state
-        )
+            CFG.domino_initialize_at_finished_state)
         kwargs["domino_use_domino_blocks_as_target"] = (
-            CFG.domino_use_domino_blocks_as_target
-        )
+            CFG.domino_use_domino_blocks_as_target)
         kwargs["domino_use_grid"] = CFG.domino_use_grid
         kwargs["domino_include_connected_predicate"] = (
-            CFG.domino_include_connected_predicate
-        )
+            CFG.domino_include_connected_predicate)
         kwargs["domino_has_glued_dominos"] = CFG.domino_has_glued_dominos
         kwargs["domino_prune_actions"] = CFG.domino_prune_actions
         kwargs["domino_only_straight_sequence_in_training"] = (
-            CFG.domino_only_straight_sequence_in_training
-        )
-        kwargs["domino_train_num_dominos"] = tuple(CFG.domino_train_num_dominos)
+            CFG.domino_only_straight_sequence_in_training)
+        kwargs["domino_train_num_dominos"] = tuple(
+            CFG.domino_train_num_dominos)
         kwargs["domino_test_num_dominos"] = tuple(CFG.domino_test_num_dominos)
-        kwargs["domino_train_num_targets"] = tuple(CFG.domino_train_num_targets)
+        kwargs["domino_train_num_targets"] = tuple(
+            CFG.domino_train_num_targets)
         kwargs["domino_test_num_targets"] = tuple(CFG.domino_test_num_targets)
         kwargs["domino_train_num_pivots"] = tuple(CFG.domino_train_num_pivots)
         kwargs["domino_test_num_pivots"] = tuple(CFG.domino_test_num_pivots)
         kwargs["domino_oracle_knows_glued_dominos"] = (
-            CFG.domino_oracle_knows_glued_dominos
-        )
+            CFG.domino_oracle_knows_glued_dominos)
         kwargs["domino_use_continuous_place"] = CFG.domino_use_continuous_place
         kwargs["domino_restricted_push"] = CFG.domino_restricted_push
         kwargs["domino_use_skill_factories"] = CFG.domino_use_skill_factories
         return DominoConfig(**kwargs)
 
     def _create_mara_env(self, config: object, use_gui: bool) -> object:
-        from mara_robosim.envs.domino.composed_env import PyBulletDominoComposedEnv
+        from mara_robosim.envs.domino.composed_env import \
+            PyBulletDominoComposedEnv
 
         return PyBulletDominoComposedEnv(config=config, use_gui=use_gui)
 
@@ -669,8 +680,7 @@ class MaraFanEnv(MaraBaseAdapter):
         kwargs["use_gui"] = use_gui
         kwargs["fan_use_skill_factories"] = CFG.fan_use_skill_factories
         kwargs["fan_fans_blow_opposite_direction"] = (
-            CFG.fan_fans_blow_opposite_direction
-        )
+            CFG.fan_fans_blow_opposite_direction)
         kwargs["fan_known_controls_relation"] = CFG.fan_known_controls_relation
         kwargs["fan_combine_switch_on_off"] = CFG.fan_combine_switch_on_off
         kwargs["fan_use_kinematic"] = CFG.fan_use_kinematic
@@ -742,8 +752,7 @@ class MaraLaserEnv(MaraBaseAdapter):
         kwargs["use_gui"] = use_gui
         kwargs["laser_zero_reflection_angle"] = CFG.laser_zero_reflection_angle
         kwargs["laser_use_debug_line_for_beams"] = (
-            CFG.laser_use_debug_line_for_beams
-        )
+            CFG.laser_use_debug_line_for_beams)
         return LaserConfig(**kwargs)
 
     def _create_mara_env(self, config: object, use_gui: bool) -> object:

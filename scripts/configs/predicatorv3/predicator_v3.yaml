@@ -1,6 +1,5 @@
-# Config file for generating the mara_bench videos
-# Excample run: 
-#    python scripts/local/launch_simp.py -c mara_bench.yaml
+# Legacy monolithic config (approaches + envs in one file)
+# Usage: python scripts/local/launch_simp.py -c predicatorv3/predicator_v3.yaml
 ---
 APPROACHES:
   # human_interaction:
@@ -16,13 +15,12 @@ APPROACHES:
       demonstrator: "oracle_process_planning"
       terminate_on_goal_reached_and_option_terminated: True
       bilevel_plan_without_sim: True
-  # mf_agent:
+  # agent_planner:
   #   NAME: "agent_planner"
   #   FLAGS:
   #     explorer: "agent"
   #     demonstrator: "oracle_process_planning"
   #     terminate_on_goal_reached_and_option_terminated: True
-  #     agent_planner_isolate_test_session: True
   #     # agent_sdk_use_docker_sandbox: True
   #     agent_sdk_use_local_sandbox: True
   #     option_model_terminate_on_repeat: False
@@ -31,14 +29,27 @@ APPROACHES:
   #     agent_planner_use_visualize_state: True
   #     agent_planner_use_annotate_scene: True
   #     option_model_use_gui: True
-  # mf_option_learning_agent:
+  # agent_bilevel:
+  #   NAME: "agent_bilevel"
+  #   FLAGS:
+  #     explorer: "agent"
+  #     demonstrator: "oracle_process_planning"
+  #     terminate_on_goal_reached_and_option_terminated: True
+  #     # agent_sdk_use_docker_sandbox: True
+  #     agent_sdk_use_local_sandbox: True
+  #     option_model_terminate_on_repeat: False
+  #     agent_sdk_max_agent_turns_per_iteration: 50
+  #     agent_planner_use_scratchpad: False
+  #     agent_planner_use_visualize_state: True
+  #     agent_planner_use_annotate_scene: True
+  #     option_model_use_gui: True
+  # agent_option_learning:
   #   NAME: "agent_option_learning"
   #   FLAGS:
   #     explorer: "agent"
   #     option_learner: "agent"
   #     demonstrator: "oracle_process_planning"
   #     terminate_on_goal_reached_and_option_terminated: True
-  #     agent_planner_isolate_test_session: True
   #     # agent_sdk_use_docker_sandbox: True
   #     agent_sdk_use_local_sandbox: True
   #     agent_sdk_max_agent_turns_per_iteration: 50
@@ -54,7 +65,7 @@ APPROACHES:
   #     online_nsrt_learning_requests_per_cycle: 1
 ENVS:
   # grow:
-  #   NAME: "mara_grow"
+  #   NAME: "pybullet_grow"
   #   FLAGS:
   #     excluded_predicates: "HandTilted"
   #     coffee_use_pixelated_jug: True
@@ -99,7 +110,7 @@ ENVS:
   #     horizon: 300
   #     script_option_file_name: "coffee.txt"
   boil:
-    NAME: "mara_boil"
+    NAME: "pybullet_boil"
     FLAGS:
       excluded_objects_in_state_str: "switch"
       max_num_steps_option_rollout: 100
@@ -124,7 +135,7 @@ ENVS:
   #     pybullet_birrt_path_subsample_ratio: 2
 ARGS:
   - "debug"
-  - "use_gui"
+  # - "use_gui"
   - "make_failure_videos"
   - "make_test_videos"
   # - "make_demo_videos"

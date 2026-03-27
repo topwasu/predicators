@@ -68,6 +68,7 @@ class _OracleOptionModel(_OptionModelBase):
         super().__init__()
         self._name_to_parameterized_option = {o.name: o for o in options}
         self._simulator = simulator
+        self._abstract_function: Optional[Callable] = None
         # Diagnostic: stores the reason when the last call returned 0 actions.
         self.last_execution_failure: str | None = None
         # Stores the full trajectory from the last successful execution.
@@ -127,11 +128,46 @@ class _OracleOptionModel(_OptionModelBase):
                         f"produced a no-op (e.g. IK returned current "
                         f"joints, or finger command matched current "
                         f"finger state).")
+                # Terminate Wait on atom change, mirroring
+                # option_policy_to_policy in utils.py.
+                if (CFG.wait_option_terminate_on_atom_change
+                        and option_copy.name == "Wait"
+                        and last_state is not DefaultState
+                        and self._abstract_function is not None):
+                    cur_atoms = self._abstract_function(s)
+                    prev_atoms = self._abstract_function(last_state)
+                    if cur_atoms != prev_atoms:
+                        logging.info(
+                            f"Wait terminating due to atom change: "
+                            f"Add: {sorted(cur_atoms - prev_atoms)} "
+                            f"Del: {sorted(prev_atoms - cur_atoms)}")
+                        last_state = s
+                        return True
                 last_state = s
                 return False
         else:
-            # mypy complains without the lambda, pylint complains with it!
-            _terminal = lambda s: option_copy.terminal(s)  # pylint: disable=unnecessary-lambda
+            if (CFG.wait_option_terminate_on_atom_change
+                    and option_copy.name == "Wait"
+                    and self._abstract_function is not None):
+                last_state_ref = [DefaultState]
+
+                def _terminal(s: State) -> bool:
+                    if option_copy.terminal(s):
+                        return True
+                    if last_state_ref[0] is not DefaultState:
+                        cur_atoms = self._abstract_function(s)
+                        prev_atoms = self._abstract_function(last_state_ref[0])
+                        if cur_atoms != prev_atoms:
+                            logging.info(
+                                f"Wait terminating due to atom change: "
+                                f"Add: {sorted(cur_atoms - prev_atoms)} "
+                                f"Del: {sorted(prev_atoms - cur_atoms)}")
+                            return True
+                    last_state_ref[0] = s
+                    return False
+            else:
+                # mypy complains without the lambda, pylint complains with it!
+                _terminal = lambda s: option_copy.terminal(s)  # pylint: disable=unnecessary-lambda
 
         try:
             traj = utils.run_policy_with_simulator(

@@ -629,6 +629,7 @@ def _run_testing(env: BaseEnv, cogman: CogMan) -> Metrics:
     # --------------------------------------------------------------------------
     # Main testing loop
     # --------------------------------------------------------------------------
+    cogman._approach.begin_test_phase()
     for test_task_idx, env_task in enumerate(test_tasks):
         # ---------------------
         # 1) Solve phase
@@ -723,6 +724,8 @@ def _run_testing(env: BaseEnv, cogman: CogMan) -> Metrics:
                 _save_images(monitor, is_failure=True, task_idx=test_task_idx)
 
         logging.info(f"Task {test_task_idx+1} / {len(test_tasks)}: {log_msg}")
+
+    cogman._approach.end_test_phase()
 
     # --------------------------------------------------------------------------
     # Aggregate final metrics

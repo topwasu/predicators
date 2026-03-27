@@ -1568,8 +1568,6 @@ def run_policy_with_simulator(
     exception_raised_in_step = False
     if not termination_function(state):
         for i in range(max_num_steps):
-            if i % 15 == 0:
-                logging.debug(f"Step {i}")
             # logging.debug(f"State: {state.pretty_str()}")
             monitor_observed = False
             exception_raised_in_step = False
@@ -1594,6 +1592,7 @@ def run_policy_with_simulator(
                 raise e
             if termination_function(state):
                 break
+        logging.debug(f"Ran {i + 1} steps")
     if monitor is not None and not exception_raised_in_step:
         monitor.observe(state, None)
     traj = LowLevelTrajectory(states, actions)
@@ -1690,15 +1689,25 @@ def option_policy_to_policy(
             cur_atoms = abstract_function(state)
             prev_atoms = abstract_function(last_state)
             if cur_atoms != prev_atoms:
-                # logging.debug(f"Prev atoms: {sorted(prev_atoms)}")
-                # logging.info(f"Add atoms: {sorted(cur_atoms-prev_atoms)} "
-                #               f"Del atoms: {sorted(prev_atoms-cur_atoms)}")
+                logging.debug(f"Wait terminating due to atom change: "
+                             f"Add: {sorted(cur_atoms-prev_atoms)} "
+                             f"Del: {sorted(prev_atoms-cur_atoms)}")
                 wait_terminate = True
 
         last_state = state
 
-        if wait_terminate or cur_option is DummyOption or cur_option.terminal(
-                state):
+        option_terminal = cur_option is not DummyOption and \
+            cur_option.terminal(state)
+        if wait_terminate or cur_option is DummyOption or option_terminal:
+            if cur_option is not DummyOption:
+                if wait_terminate:
+                    reason = "atom change during Wait"
+                elif option_terminal:
+                    reason = "option self-terminated"
+                else:
+                    reason = "unknown"
+                logging.info(f"[{cur_option.name}] Terminated: {reason} "
+                              f"(after {num_cur_option_steps} steps)\n")
             try:
                 cur_option = option_policy(state)
             except OptionExecutionFailure as e:
@@ -1731,7 +1740,7 @@ def option_plan_to_policy(
         if not queue:
             raise OptionExecutionFailure("Option plan exhausted!")
         option = queue.pop(0)
-        logging.debug(f"Executing option {option.simple_str()}")
+        logging.info(f"Executing option {option.simple_str()}")
         return option
 
     return option_policy_to_policy(

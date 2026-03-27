@@ -58,6 +58,12 @@ class AgentPlannerApproach(AgentSessionMixin, BaseApproach):
             self._option_model = option_model
         else:
             self._option_model = create_option_model(CFG.option_model_name)
+        # Let the option model terminate Wait on atom change using the
+        # approach's predicates (which may include invented ones).
+        if CFG.wait_option_terminate_on_atom_change:
+            preds = self._get_all_predicates()
+            self._option_model._abstract_function = \
+                lambda s, _p=preds: utils.abstract(s, _p)
         self._online_learning_cycle = 0
         self._requests_train_task_idxs: Optional[List[int]] = None
         self._run_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -352,13 +358,6 @@ scene, then annotate_scene overlays markers on it."""
     # ------------------------------------------------------------------ #
 
     def _solve(self, task: Task, timeout: int) -> Callable[[State], Action]:
-        if CFG.agent_planner_isolate_test_session:
-            return self._solve_with_isolated_session(task, timeout)
-        return self._solve_shared_session(task, timeout)
-
-    def _solve_shared_session(self, task: Task,
-                              timeout: int) -> Callable[[State], Action]:
-        """Solve using the shared session (test queries stay in context)."""
         self._sync_tool_context()
         self._tool_context.current_task = task
         try:
@@ -378,49 +377,26 @@ scene, then annotate_scene overlays markers on it."""
 
         return _policy
 
-    def _solve_with_isolated_session(
-            self, task: Task, timeout: int) -> Callable[[State], Action]:
-        """Solve in a fresh session so test queries don't accumulate in the
-        learning session.
+    # ------------------------------------------------------------------ #
+    # Test phase lifecycle
+    # ------------------------------------------------------------------ #
 
-        The learning conversation log is injected as context so the test
-        session retains knowledge from learning.
-        """
-        learning_session = self._agent_session
-        learning_log = (learning_session.conversation_log
-                        if learning_session is not None else [])
-        self._agent_session = None
+    def begin_test_phase(self) -> None:
+        """Snapshot the learning conversation log before testing."""
+        if self._agent_session is not None:
+            import copy
+            self._pre_test_conversation_log = copy.deepcopy(
+                self._agent_session.conversation_log)
+        else:
+            self._pre_test_conversation_log = None
 
-        try:
-            self._sync_tool_context()
-            self._tool_context.current_task = task
-
-            # Inject learning context into the fresh test session
-            if learning_log:
-                context_msg = self._build_learning_context(learning_log)
-                self._query_agent_sync(context_msg)
-
-            try:
-                option_plan = self._query_agent_for_option_plan(task)
-            except Exception as e:
-                raise ApproachFailure(
-                    f"Agent failed to produce option plan: {e}")
-
-            preds = self._get_all_predicates()
-            policy = utils.option_plan_to_policy(
-                option_plan,
-                abstract_function=lambda s: utils.abstract(s, preds))
-
-            def _policy(s: State) -> Action:
-                try:
-                    return policy(s)
-                except utils.OptionExecutionFailure as e:
-                    raise ApproachFailure(e.args[0], e.info)
-
-            return _policy
-        finally:
-            self._close_agent_session()
-            self._agent_session = learning_session
+    def end_test_phase(self) -> None:
+        """Restore the conversation log to its pre-test state."""
+        if self._agent_session is not None \
+                and self._pre_test_conversation_log is not None:
+            self._agent_session._conversation_log = \
+                self._pre_test_conversation_log
+        self._pre_test_conversation_log = None
 
     def _query_agent_for_option_plan(self, task: Task) -> list:
         """Query the agent for an option plan and parse it."""
@@ -595,60 +571,6 @@ Output ONLY the option plan lines at the end, after any analysis."""
                 )
 
         return "\n".join(lines)
-
-    def _build_learning_context(self,
-                                conversation_log: List[Dict[str, Any]]) -> str:
-        """Build a context message from the learning session's conversation log
-        so that test sessions retain knowledge from learning.
-
-        Preserves the full conversation structure including tool calls
-        and their results so the agent sees the same information it
-        would in the original session.
-        """
-        sections: List[str] = []
-        sections.append(
-            "Below is the transcript of your previous learning "
-            "interactions. Use this context to inform your planning.\n")
-
-        for i, entry in enumerate(conversation_log):
-            query = entry.get("query", "")
-            sections.append(f"=== Learning Interaction {i + 1} ===")
-            sections.append(f"[User]\n{query}")
-
-            for msg in entry.get("response", []):
-                msg_type = msg.get("type")
-                if msg_type == "assistant":
-                    parts: List[str] = []
-                    for block in msg.get("content", []):
-                        if not isinstance(block, dict):
-                            continue
-                        btype = block.get("type")
-                        if btype == "text":
-                            parts.append(block["text"])
-                        elif btype == "tool_use":
-                            name = block.get("name", "?")
-                            inp = block.get("input", {})
-                            parts.append(f"[Tool Call: {name}]\n{inp}")
-                    if parts:
-                        sections.append(f"[Assistant]\n" + "\n".join(parts))
-                elif msg_type == "user":
-                    parts = []
-                    for block in msg.get("content", []):
-                        if not isinstance(block, dict):
-                            continue
-                        btype = block.get("type")
-                        if btype == "text":
-                            parts.append(block["text"])
-                        elif btype == "tool_result":
-                            content = block.get("content", "")
-                            is_err = block.get("is_error", False)
-                            prefix = "[Tool Error]" if is_err \
-                                else "[Tool Result]"
-                            parts.append(f"{prefix}\n{content}")
-                    if parts:
-                        sections.append("\n".join(parts))
-
-        return "\n\n".join(sections)
 
     def _extract_option_plan_text(self, responses: List[Dict[str,
                                                              Any]]) -> str:

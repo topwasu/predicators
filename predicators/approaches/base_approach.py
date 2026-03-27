@@ -134,6 +134,19 @@ class BaseApproach(abc.ABC):
         """Reset the metrics dictionary."""
         self._metrics = defaultdict(float)
 
+    def begin_test_phase(self) -> None:
+        """Called before the test task loop begins.
+
+        Override to set up test-phase state (e.g. isolating the agent
+        session so test context doesn't leak into learning).
+        """
+
+    def end_test_phase(self) -> None:
+        """Called after the test task loop ends.
+
+        Override to tear down test-phase state.
+        """
+
 
 class BaseApproachWrapper(BaseApproach):
     """Base class for an approach that wraps another approach."""

@@ -71,14 +71,24 @@ def run_motion_planning(
     def _collision_fn(pt: JointPositions) -> bool:
         _set_state(pt)
         p.performCollisionDetection(physicsClientId=physics_client_id)
+        # Use a penetration margin to distinguish real collisions from
+        # resting-on-surface contacts (e.g. a grasped object sitting on a
+        # table, or a gripper touching a just-released object).
+        # getContactPoints returns tuples where index 8 is contactDistance:
+        # negative = penetration, ~0 = touching, positive = separation.
+        # Only penetration deeper than the margin counts as a collision.
+        margin = CFG.pybullet_birrt_contact_margin
         for body in collision_bodies:
-            if p.getContactPoints(robot.robot_id,
-                                  body,
-                                  physicsClientId=physics_client_id):
+            contacts = p.getContactPoints(robot.robot_id,
+                                          body,
+                                          physicsClientId=physics_client_id)
+            if any(c[8] < margin for c in contacts):
                 return True
-            if held_object is not None and p.getContactPoints(
-                    held_object, body, physicsClientId=physics_client_id):
-                return True
+            if held_object is not None:
+                contacts = p.getContactPoints(
+                    held_object, body, physicsClientId=physics_client_id)
+                if any(c[8] < margin for c in contacts):
+                    return True
         return False
 
     def _distance_fn(from_pt: JointPositions, to_pt: JointPositions) -> float:

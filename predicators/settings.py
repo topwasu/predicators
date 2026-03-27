@@ -182,6 +182,7 @@ class GlobalSettings:
     pybullet_birrt_smooth_amt = 50
     pybullet_birrt_extend_num_interp = 10
     pybullet_birrt_path_subsample_ratio = 1
+    pybullet_birrt_contact_margin = -0.001
     pybullet_control_mode = "position"
     pybullet_max_vel_norm = 0.05
     # env -> robot -> quaternion
@@ -980,10 +981,15 @@ class GlobalSettings:
     agent_explorer_fallback_to_random = True  # fall back to random on failure
 
     # Agent planner approach settings
-    agent_planner_isolate_test_session = True
     agent_planner_use_scratchpad = False  # include notes.md scratchpad
     agent_planner_use_visualize_state = False  # include visualize_state tool
     agent_planner_use_annotate_scene = False  # include annotate_scene tool
+
+    # Agent bilevel approach settings
+    agent_bilevel_max_samples_per_step = 50  # param samples per step
+    agent_bilevel_max_retries = 1  # re-query agent on refinement failure
+    agent_bilevel_check_subgoals = True  # check subgoal atoms after each step
+    agent_bilevel_log_state = False  # log state pretty_str before/after each step
 
     @classmethod
     def get_arg_specific_settings(cls, args: Dict[str, Any]) -> Dict[str, Any]:

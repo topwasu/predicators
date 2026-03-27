@@ -176,6 +176,7 @@ class Phase:
     finger_tol: Optional[float] = None
     use_motion_planning: bool = field(
         default_factory=lambda: CFG.skill_phase_use_motion_planning)
+    expect_contact: bool = False
 
 
 class PhaseSkill:
@@ -371,15 +372,22 @@ class PhaseSkill:
 
             if self._config.simulator is not None:
                 traj = self._plan_with_simulator(pb_state, target_pose,
-                                                 phase.name)
+                                                 phase.name,
+                                                 phase.expect_contact)
             else:
                 traj = self._plan_without_simulator(pb_state, target_pose,
                                                     phase.name)
 
             if traj is None:
-                logging.warning(f"[{self._name}/{phase.name}] BiRRT failed; "
-                                "falling back to incremental IK.")
-                memory[traj_key] = None
+                if phase.expect_contact:
+                    logging.debug("[%s/%s] BiRRT failed; falling back to "
+                                  "incremental IK.", self._name, phase.name)
+                    memory[traj_key] = None
+                else:
+                    raise utils.OptionExecutionFailure(
+                        f"[{self._name}/{phase.name}] BiRRT collision: "
+                        f"motion planning failed (no collision-free path)."
+                    )
             else:
                 # Skip the first waypoint — BiRRT includes the start
                 # position (current joints) as traj[0].  Commanding the
@@ -509,6 +517,7 @@ class PhaseSkill:
         pb_state: utils.PyBulletState,
         target_pose: Pose,
         phase_name: str,
+        expect_contact: bool = False,
     ) -> Optional[Sequence[JointPositions]]:
         """Plan using the simulator env for collision-aware motion planning.
 
@@ -599,7 +608,7 @@ class PhaseSkill:
             base_link_to_held_obj=base_link_to_held_obj,
         )
 
-        if traj is None:
+        if traj is None and not expect_contact:
             self._log_collision_diagnostics(planning_robot,
                                             sim._physics_client_id,
                                             pb_state.joint_positions,
@@ -639,6 +648,7 @@ class PhaseSkill:
                     wt_ho[1],
                     physicsClientId=physics_client_id)
             p.performCollisionDetection(physicsClientId=physics_client_id)
+            margin = CFG.pybullet_birrt_contact_margin
             for body in collision_bodies:
                 body_name = ""
                 try:
@@ -646,15 +656,20 @@ class PhaseSkill:
                         body, physicsClientId=physics_client_id)[1].decode()
                 except Exception:
                     pass
-                if p.getContactPoints(planning_robot.robot_id,
-                                      body,
-                                      physicsClientId=physics_client_id):
+                contacts = p.getContactPoints(
+                    planning_robot.robot_id, body,
+                    physicsClientId=physics_client_id)
+                if any(c[8] < margin for c in contacts):
                     logging.error(f"[{self._name}/{phase_name}] {label} ROBOT "
                                   f"collision with body {body} ({body_name})")
-                if held_object is not None and p.getContactPoints(
-                        held_object, body, physicsClientId=physics_client_id):
-                    logging.error(f"[{self._name}/{phase_name}] {label} HELD "
-                                  f"collision with body {body} ({body_name})")
+                if held_object is not None:
+                    contacts = p.getContactPoints(
+                        held_object, body,
+                        physicsClientId=physics_client_id)
+                    if any(c[8] < margin for c in contacts):
+                        logging.error(
+                            f"[{self._name}/{phase_name}] {label} HELD "
+                            f"collision with body {body} ({body_name})")
 
         _check(start_joints, "START")
         _check(goal_joints, "GOAL")

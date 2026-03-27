@@ -60,8 +60,8 @@ from predicators.structs import Array, Object, ParameterizedOption, State, Type
 # Canonical continuous parameters for Push.
 _PUSH_PARAMS = [
     ("approach_distance (dist behind target along facing dir to start push)",
-     0.00, 0.05),
-    ("contact_z_offset (height above target z for contact)", 0.0, 0.1),
+     0.00, 0.06),
+    ("contact_z_offset (height above target z for contact)", 0.0, 0.11),
 ]
 
 
@@ -186,11 +186,14 @@ def create_push_skill(
               target_fn=_close_fingers_target))
 
     for i in range(4):
+        # Waypoint_2 (push into target) and Waypoint_3 (retreat from target)
+        # expect robot-object contact, so suppress collision diagnostics.
         phases.append(
             make_move_to_phase(
                 name=f"Waypoint_{i}",
                 get_target_pose_fn=_make_waypoint_position_fn(i),
-                finger_status="closed"))
+                finger_status="closed",
+                expect_contact=(i >= 2)))
 
     phases.append(
         Phase(name="OpenFingers",

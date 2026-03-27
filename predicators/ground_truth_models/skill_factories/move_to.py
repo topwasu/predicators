@@ -100,6 +100,7 @@ def make_move_to_phase(
     name: str,
     get_target_pose_fn: TargetPoseFn,
     finger_status: Optional[str] = None,
+    expect_contact: bool = False,
 ) -> Phase:
     """Create a MOVE_TO_POSE phase for use in a ``PhaseSkill``.
 
@@ -164,4 +165,5 @@ def make_move_to_phase(
         name=name,
         action_type=PhaseAction.MOVE_TO_POSE,
         target_fn=_target_fn,
+        expect_contact=expect_contact,
     )

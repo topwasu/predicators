@@ -1,0 +1,7 @@
+# Composed config: oracle approach
+# Usage: python scripts/local/launch_simp.py -c predicatorv3/oracle.yaml
+---
+includes:
+  - common.yaml
+  - approaches/oracle.yaml
+  - envs/all.yaml

@@ -1,0 +1,7 @@
+# Composed config: agent approaches
+# Usage: python scripts/local/launch_simp.py -c predicatorv3/agents.yaml
+---
+includes:
+  - common.yaml
+  - approaches/agents.yaml
+  - envs/all.yaml

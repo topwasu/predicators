@@ -58,7 +58,7 @@ class PyBulletBoilGroundTruthOptionFactory(_BoilLegacyOptionsMixin,
                                                                     Predicate],
             action_space: Box) -> Set[ParameterizedOption]:
         """Skill-factory-based option implementations for the boil env."""
-        del env_name, action_space  # unused
+        del env_name, action_space, predicates  # unused
 
         _, pybullet_robot, _ = \
             PyBulletBoilEnv.initialize_pybullet(using_gui=False)
@@ -77,7 +77,7 @@ class PyBulletBoilGroundTruthOptionFactory(_BoilLegacyOptionsMixin,
             robot=pybullet_robot,
             open_fingers_joint=pybullet_robot.open_fingers,
             closed_fingers_joint=pybullet_robot.closed_fingers,
-            fingers_state_to_joint=PyBulletBoilEnv._fingers_state_to_joint,
+            fingers_state_to_joint=PyBulletBoilEnv._fingers_state_to_joint,  # pylint: disable=protected-access
             robot_init_tilt=PyBulletBoilEnv.robot_init_tilt,
             robot_init_wrist=PyBulletBoilEnv.robot_init_wrist,
             robot_home_pos=(env_cls.robot_init_x, env_cls.robot_init_y,

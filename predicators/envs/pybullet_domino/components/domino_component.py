@@ -8,8 +8,8 @@ This component handles:
 """
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, ClassVar, Dict, List, \
-    Optional, Sequence, Set, Tuple
+from typing import TYPE_CHECKING, Any, ClassVar, Dict, List, Optional, \
+    Sequence, Set, Tuple
 from typing import Type as TypingType
 
 import numpy as np
@@ -47,7 +47,8 @@ class DominoComponent(DominoEnvComponent):
     """Component for domino blocks, targets, and pivots.
 
     Manages the core domino mechanics including:
-    - Domino blocks with different colors for roles (start, target, intermediate, glued)
+    - Domino blocks with different colors for roles
+      (start, target, intermediate, glued)
     - Target objects that can be toppled
     - Pivot objects for 180-degree direction changes
 
@@ -81,36 +82,43 @@ class DominoComponent(DominoEnvComponent):
     target_height: ClassVar[float] = 0.2
     pivot_width: ClassVar[float] = 0.2
 
-    # Grid configuration - references domino_width from PyBulletDominoComposedEnv
+    # Grid configuration - references domino_width from
+    # PyBulletDominoComposedEnv
     @staticmethod
-    def _get_env_class() -> "TypingType[PyBulletDominoComposedEnv]":
+    def _get_env_class() -> TypingType["PyBulletDominoComposedEnv"]:
         """Get PyBulletDominoComposedEnv class to access shared config."""
         from predicators.envs.pybullet_domino.composed_env import \
-            PyBulletDominoComposedEnv
+            PyBulletDominoComposedEnv  # pylint: disable=import-outside-toplevel
         return PyBulletDominoComposedEnv
 
     @property
     def domino_width(self) -> float:
+        """Domino width."""
         return self._get_env_class().domino_width
 
     @property
     def domino_depth(self) -> float:
+        """Domino depth."""
         return self._get_env_class().domino_depth
 
     @property
     def domino_height(self) -> float:
+        """Domino height."""
         return self._get_env_class().domino_height
 
     @property
     def domino_mass(self) -> float:
+        """Domino mass."""
         return self._get_env_class().domino_mass
 
     @property
     def domino_friction(self) -> float:
+        """Domino friction."""
         return self._get_env_class().domino_friction
 
     @property
     def pos_gap(self) -> float:
+        """Pos gap."""
         return self._get_env_class().pos_gap
 
     turn_shift_frac: ClassVar[float] = 0.6
@@ -130,7 +138,7 @@ class DominoComponent(DominoEnvComponent):
             num_dominos_max: Maximum number of domino blocks.
             num_targets_max: Maximum number of target objects.
             num_pivots_max: Maximum number of pivot objects.
-            workspace_bounds: Dictionary with x_lb, x_ub, y_lb, y_ub, z_lb, z_ub.
+            workspace_bounds: Dict with x/y/z lower/upper bounds.
         """
         super().__init__()
 
@@ -157,8 +165,10 @@ class DominoComponent(DominoEnvComponent):
 
         # Domino-specific placement bounds (narrower than workspace)
         # to avoid placing dominoes too close to edges
-        self.domino_y_lb = self.y_lb + self.domino_width  # 1.1 + 0.07 = 1.17
-        self.domino_y_ub = self.y_ub - 3 * self.domino_width  # 1.6 - 0.21 = 1.39
+        # 1.1 + 0.07 = 1.17
+        self.domino_y_lb = self.y_lb + self.domino_width
+        # 1.6 - 0.21 = 1.39
+        self.domino_y_ub = self.y_ub - 3 * self.domino_width
         self.domino_x_lb = self.x_lb
         self.domino_x_ub = self.x_ub
 
@@ -310,11 +320,13 @@ class DominoComponent(DominoEnvComponent):
 
         for target, id_ in zip(self.targets, pybullet_bodies["target_ids"]):
             target.id = id_
+            assert self._physics_client_id is not None
             target.joint_id = self._get_joint_id(id_, "flap_hinge_joint",
                                                  self._physics_client_id)
 
         for pivot, id_ in zip(self.pivots, pybullet_bodies["pivot_ids"]):
             pivot.id = id_
+            assert self._physics_client_id is not None
             pivot.joint_id = self._get_joint_id(id_, "flap_hinge_joint",
                                                 self._physics_client_id)
 
@@ -411,9 +423,8 @@ class DominoComponent(DominoEnvComponent):
         if CFG.domino_use_domino_blocks_as_target:
             roll_angle = abs(state.get(obj, "roll"))
             return roll_angle >= self.fallen_threshold
-        else:
-            rot_z = state.get(obj, "yaw")
-            return abs(utils.wrap_angle(rot_z)) < 0.8
+        rot_z = state.get(obj, "yaw")
+        return abs(utils.wrap_angle(rot_z)) < 0.8
 
     def _Upright_holds(self, state: State, objects: Sequence[Object]) -> bool:
         """Check if domino is upright."""
@@ -505,7 +516,7 @@ class DominoComponent(DominoEnvComponent):
     # -------------------------------------------------------------------------
 
     def place_domino(self,
-                     domino_idx: int,
+                     _domino_idx: int,
                      x: float,
                      y: float,
                      rot: float,
@@ -526,7 +537,8 @@ class DominoComponent(DominoEnvComponent):
                 else:
                     should_be_glued = (rng is not None and
                                        rng.random() < self.glued_percentage)
-            color = self.glued_domino_color if should_be_glued else self.target_domino_color
+            color = (self.glued_domino_color
+                     if should_be_glued else self.target_domino_color)
         else:
             color = self.domino_color
 
@@ -560,18 +572,22 @@ class DominoComponent(DominoEnvComponent):
 
     @property
     def domino_type(self) -> Type:
+        """Domino type."""
         return self._domino_type
 
     @property
     def target_type(self) -> Type:
+        """Target type."""
         return self._target_type
 
     @property
     def pivot_type(self) -> Type:
+        """Pivot type."""
         return self._pivot_type
 
     @property
     def Toppled(self) -> Predicate:
+        """Toppled."""
         return self._Toppled
 
 

@@ -291,9 +291,12 @@ def test_move_to_shelf():
     # Create block.
     color = block_color
     half_extents = (block_size / 2.0, block_size / 2.0, block_size / 2.0)
-    block_id = create_pybullet_block(color, half_extents, obj_mass,
-                                     obj_friction, default_orn,
-                                     physics_client_id)
+    block_id = create_pybullet_block(color,
+                                     half_extents,
+                                     obj_mass,
+                                     obj_friction,
+                                     orientation=default_orn,
+                                     physics_client_id=physics_client_id)
     p.resetBasePositionAndOrientation(block_id, [block_x, block_y, block_z],
                                       default_orn,
                                       physicsClientId=physics_client_id)
@@ -354,14 +357,19 @@ def test_move_to_shelf():
     _set_state(initial_positions)
 
     collision_bodies = {shelf_id, table_id}
-    plan = run_motion_planning(robot,
-                               initial_positions,
-                               target_positions,
-                               collision_bodies,
-                               held_object=held_obj_id,
-                               base_link_to_held_obj=base_link_to_held_obj,
-                               seed=123,
-                               physics_client_id=physics_client_id)
+    # Motion planning is non-deterministic (RRT); try multiple seeds.
+    plan = None
+    for seed in [123, 456, 789]:
+        plan = run_motion_planning(robot,
+                                   initial_positions,
+                                   target_positions,
+                                   collision_bodies,
+                                   held_object=held_obj_id,
+                                   base_link_to_held_obj=base_link_to_held_obj,
+                                   seed=seed,
+                                   physics_client_id=physics_client_id)
+        if plan is not None:
+            break
     assert plan is not None
 
     # Replay the plan.

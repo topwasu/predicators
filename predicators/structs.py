@@ -6,11 +6,18 @@ import abc
 import copy
 import itertools
 import random
+import textwrap
 from dataclasses import dataclass, field, replace
 from functools import cached_property, lru_cache
-from typing import Any, Callable, Collection, DefaultDict, Dict, Iterator, \
-    List, Optional, Sequence, Set, Tuple, TypeVar, Union, cast
+from inspect import getsource
+from typing import TYPE_CHECKING, Any, Callable, Collection, DefaultDict, \
+    Dict, Iterator, List, Optional, Sequence, Set, Tuple, TypeVar, Union, \
+    cast
 
+if TYPE_CHECKING:
+    from predicators.utils import VLMQuery, VLMState
+
+# pylint: disable=wrong-import-position
 import numpy as np
 import PIL.Image
 import torch
@@ -22,6 +29,8 @@ from torch import Tensor
 import predicators.pretrained_model_interface
 import predicators.utils as utils  # pylint: disable=consider-using-from-import
 from predicators.settings import CFG
+
+# pylint: enable=wrong-import-position
 
 
 @dataclass(frozen=True, order=True)
@@ -46,7 +55,8 @@ class Type:
     feature_names: Sequence[str] = field(repr=False)
     parent: Optional[Type] = field(default=None, repr=False)
     sim_features: Sequence[str] = field(default_factory=lambda: ["id"],
-                                        repr=False)
+                                        repr=False,
+                                        compare=False)
 
     @property
     def dim(self) -> int:
@@ -123,7 +133,9 @@ class _TypedEntity:
 class Object(_TypedEntity):
     """Struct defining an Object, which is just a _TypedEntity whose name does
     not start with "?"."""
-    sim_data: Dict[str, Any] = field(default_factory=dict)
+    sim_data: Dict[str, Any] = field(default_factory=dict,
+                                     compare=False,
+                                     repr=False)
 
     def __post_init__(self) -> None:
         assert not self.name.startswith("?")
@@ -131,12 +143,18 @@ class Object(_TypedEntity):
         for sim_feature in self.type.sim_features:
             self.sim_data[sim_feature] = None  # Default to None
         # Keep track of allowed attributes
-        self._allowed_attributes = {"sim_data"}.union(self.sim_data.keys())
+        object.__setattr__(self, '_allowed_attributes',
+                           {"sim_data"}.union(self.sim_data.keys()))
 
     def __getattr__(self, name: str) -> Any:
         # Bypass custom logic for internal attributes
         # Use object.__getattribute__(...) instead of self.sim_data
-        sim_data = object.__getattribute__(self, "sim_data")
+        try:
+            sim_data = object.__getattribute__(self, "sim_data")
+        except AttributeError:
+            raise AttributeError(
+                f"'{type(self).__name__}' object has no attribute '{name}'"
+            ) from None
         if name in sim_data:
             return sim_data[name]
         raise AttributeError(
@@ -173,10 +191,8 @@ class Object(_TypedEntity):
 
     @cached_property
     def id_name(self) -> str:
-        try:
-            assert self.id is not None, "Object must have an id set to use id_name"
-        except:
-            breakpoint()
+        """Return a name combining the type name and object id."""
+        assert self.id is not None, "Object must have an id set to use id_name"
         return f"{self.type.name}{self.id}"
 
 
@@ -307,15 +323,15 @@ class State:
         suffix = "\n" + "#" * ll + "\n"
         return prefix + "\n\n".join(table_strs) + suffix
 
-    def dict_str(
-        self,
-        indent: int = 0,
-        object_features: bool = True,
-        num_decimal_points: int = 2,
-        use_object_id: bool = False,
-        ignored_features: List[str] = ["capacity_liquid",
-                                       "target_liquid"]) -> str:
+    def dict_str(self,
+                 indent: int = 0,
+                 object_features: bool = True,
+                 num_decimal_points: int = 2,
+                 use_object_id: bool = False,
+                 ignored_features: Optional[List[str]] = None) -> str:
         """Return a dictionary representation of the state."""
+        if ignored_features is None:
+            ignored_features = ["capacity_liquid", "target_liquid"]
         excluded_objects = []
         if CFG.excluded_objects_in_state_str:
             excluded_objects = CFG.excluded_objects_in_state_str.split(",")
@@ -466,6 +482,7 @@ class Predicate:
         return vars_str, body_str
 
     def pretty_str_with_assertion(self) -> str:
+        """Return a pretty string with assertion format."""
         var_names = []
         vars_str = []
         for i, t in enumerate(self.types):
@@ -534,8 +551,10 @@ class DerivedPredicate(Predicate):
             self,
             auxiliary_predicates: Set[DerivedPredicate]) -> DerivedPredicate:
         """Create a new ConceptPredicate with updated auxiliary_concepts."""
-        return replace(self, auxiliary_predicates=auxiliary_predicates
-                       )  # type: ignore[arg-type]
+        return replace(
+            self,
+            auxiliary_predicates=auxiliary_predicates  # type: ignore[arg-type]
+        )
 
     @cached_property
     def _hash(self) -> int:
@@ -557,8 +576,8 @@ class DerivedPredicate(Predicate):
                 return False
         return True
 
-    def holds(self, state: Set[GroundAtom],
-              objects: Sequence[Object]) -> bool:  # type: ignore[override]
+    def holds(  # type: ignore[override]
+            self, state: Set[GroundAtom], objects: Sequence[Object]) -> bool:
         """Public method for calling the classifier.
 
         Performs type checking first.
@@ -605,11 +624,12 @@ class NSPredicate(Predicate):
     """Neuro-Symbolic Predicate."""
 
     def __init__(
-        self, name: str, types: Sequence[Type],
-        _classifier: Callable[[RawState, Sequence[Object]], bool]
-    ) -> None:  # type: ignore[name-defined]
+            self, name: str, types: Sequence[Type],
+            _classifier: Callable[[VLMState, Sequence[Object]], bool]) -> None:
         self._original_classifier = _classifier
-        super().__init__(name, types, _MemoizedClassifier(_classifier))
+        super().__init__(
+            name, types,
+            _MemoizedClassifier(_classifier))  # type: ignore[arg-type]
 
     @cached_property
     def _hash(self) -> int:
@@ -642,8 +662,9 @@ class _MemoizedClassifier():
         self.cache[combined_hash] = truth_value
 
     def hash_state_objs(self, state: State, objects: Sequence[Object]) -> int:
+        """Hash a state and objects pair."""
         objects_tuple_hash = hash(tuple(objects))
-        state_hash = state.__hash__()
+        state_hash = hash(state)
         return hash((state_hash, objects_tuple_hash))
 
     def has_classified(self, state: State, objects: Sequence[Object]) -> bool:
@@ -690,8 +711,8 @@ class ConceptPredicate(Predicate):
     def __hash__(self) -> int:
         return self._hash
 
-    def holds(self, state: Set[GroundAtom],
-              objects: Sequence[Object]) -> bool:  # type: ignore[override]
+    def holds(  # type: ignore[override]
+            self, state: Set[GroundAtom], objects: Sequence[Object]) -> bool:
         """Public method for calling the classifier.
 
         Performs type checking first.
@@ -767,8 +788,9 @@ class _Atom:
         - This ensures that when the object is unpickled, all dataclass fields
         (predicate, entities) are set before anything like hashing or
         stringification is triggered.
-            - This prevents errors where e.g. self.predicate does not exist yet at
-        the time __hash__ or __str__ is called during deserialization (which is
+            - This prevents errors where e.g. self.predicate
+        does not exist yet at the time __hash__ or __str__ is
+        called during deserialization (which is
         exactly what caused crash during parallel pnad learning).
         """
         return (self.__class__, (self.predicate, tuple(self.entities)))
@@ -832,20 +854,26 @@ class GroundAtom(_Atom):
         """If this GroundAtom is associated with a VLMPredicate, then get the
         string that will be used to query the VLM."""
         assert isinstance(self.predicate, VLMPredicate)
-        return self.predicate.get_vlm_query_str(self.objects)  # type: ignore[misc]  # pylint:disable=no-member
+        # pylint: disable=no-member
+        return self.predicate.get_vlm_query_str(  # type: ignore[misc]
+            self.objects)
+        # pylint: enable=no-member
 
     def get_negated_atom(self) -> GroundAtom:
         """Get the negated atom of this GroundAtom."""
         from predicators.approaches.grammar_search_invention_approach import \
-            _NegationClassifier
+            _NegationClassifier  # pylint: disable=import-outside-toplevel
+
+        # pylint: disable=protected-access
         if isinstance(self.predicate._classifier, _NegationClassifier):
             return GroundAtom(self.predicate._classifier.body, self.objects)
-        else:
-            # classifier = _NegationClassifier(self.predicate)
-            # negated_predicate = Predicate(str(classifier), self.predicate.types,
-            #     classifier)
-            # return GroundAtom(negated_predicate, self.objects)
-            return GroundAtom(self.predicate.get_negation(), self.objects)
+        # pylint: enable=protected-access
+        # classifier = _NegationClassifier(self.predicate)
+        # negated_predicate = Predicate(
+        #     str(classifier),
+        #     self.predicate.types, classifier)
+        # return GroundAtom(negated_predicate, self.objects)
+        return GroundAtom(self.predicate.get_negation(), self.objects)
 
 
 @dataclass(frozen=True, eq=False)
@@ -998,7 +1026,8 @@ class ParameterizedOption:
     # terminate now. The objects' types will match those in
     # self.types. The parameters will be contained in params_space.
     terminal: ParameterizedTerminal = field(repr=False)
-    params_description: Optional[Tuple[str, ...]] = None
+    params_description: Optional[Tuple[str, ...]] = field(default=None,
+                                                          repr=False)
 
     @cached_property
     def _hash(self) -> int:
@@ -1173,9 +1202,9 @@ class STRIPSOperator:
             add_effects=self.add_effects if option.name != "Wait" else set(),
             delete_effects=self.delete_effects
             if option.name != "Wait" else set(),
-            delay_distribution=utils.CMPDelay(
-                *process_delay_params,  # type: ignore[attr-defined]
-                rng=process_rng),
+            delay_distribution=utils.DiscreteGaussianDelay(
+                torch.tensor(process_delay_params[0]),
+                torch.tensor(process_delay_params[1])),
             strength=process_strength,  # type: ignore[arg-type]
             option=option,
             option_vars=option_vars,
@@ -1183,10 +1212,10 @@ class STRIPSOperator:
         return proc
 
     def make_exogenous_process(
-            self,
-            process_strength: Optional[float] = None,
-            process_delay_params: Optional[Sequence[float]] = None,
-            process_rng: Optional[np.random.Generator] = None
+        self,
+        process_strength: Optional[float] = None,
+        process_delay_params: Optional[Sequence[float]] = None,
+        _process_rng: Optional[np.random.Generator] = None
     ) -> ExogenousProcess:
         """Make an ExogenousProcess out of this STRIPSOperator object."""
         if process_delay_params is None:
@@ -1877,13 +1906,18 @@ class ClassificationDataset:
     query_videos: List[List[Video]]
     query_labels: List[List[int]]
     seed: int
+    _current_idx: int = field(default=0, init=False, repr=False)
+    _rng: random.Random = field(
+        default=None,  # type: ignore[assignment]
+        init=False,
+        repr=False)
 
     def __post_init__(self) -> None:
         assert len(self.support_videos) == len(self.support_labels) == \
                 len(self.query_videos) == len(self.query_labels) == \
                 len(self.task_names)
-        self._current_idx: int = 0
-        self._rng = random.Random(self.seed)  # Create a local random generator
+        self._current_idx = 0
+        self._rng = random.Random(self.seed)
 
     def __iter__(self) -> "Iterator[ClassificationEpisode]":
         self._current_idx = 0
@@ -2082,16 +2116,15 @@ class PNAD:
                                                self.sampler)
 
     def make_exogenous_process(
-            self,
-            process_strength: Optional[float] = None,
-            process_delay_params: Optional[Sequence[float]] = None,
-            process_rng: Optional[np.random.Generator] = None
+        self,
+        process_strength: Optional[float] = None,
+        process_delay_params: Optional[Sequence[float]] = None,
+        _process_rng: Optional[np.random.Generator] = None
     ) -> ExogenousProcess:
         """Make an ExogenousProcess from this PNAD."""
         return self.op.make_exogenous_process(
             process_strength=process_strength,
             process_delay_params=process_delay_params,
-            process_rng=process_rng,
         )
 
     def copy(self) -> PNAD:
@@ -2609,18 +2642,31 @@ class GroundMacro:
 
 @dataclass(frozen=False, repr=False, eq=False)
 class DelayDistribution:
+    """Base class for delay distributions."""
 
     def set_parameters(self, parameters: Sequence[torch.Tensor],
                        **kwargs: Any) -> None:
+        """Set the parameters of this distribution."""
         raise NotImplementedError
 
     def get_parameters(self) -> Sequence[float]:
+        """Get the parameters of this distribution."""
         raise NotImplementedError
 
     def sample(self) -> int:
+        """Sample a delay from this distribution."""
         raise NotImplementedError
 
     def log_prob(self, k: Union[int, torch.Tensor]) -> torch.Tensor:
+        """Compute the log probability of a delay value."""
+        raise NotImplementedError
+
+    def probability(self, k: int) -> float:
+        """Compute the probability of a delay value."""
+        raise NotImplementedError
+
+    def copy(self) -> DelayDistribution:
+        """Create a copy of this distribution."""
         raise NotImplementedError
 
     def __str__(self) -> str:
@@ -2633,11 +2679,12 @@ class DelayDistribution:
 
 @dataclass(frozen=False, repr=False, eq=False)
 class PartialProcess:
-    pass
+    """A partial process placeholder."""
 
 
 @dataclass(frozen=False, repr=False, eq=False)
 class CausalProcess(abc.ABC):
+    """Abstract base class for causal processes."""
     name: str
     parameters: Sequence[Variable]
     condition_at_start: Set[LiftedAtom]
@@ -2650,12 +2697,11 @@ class CausalProcess(abc.ABC):
 
     @abc.abstractmethod
     def ground(self, objects: Sequence[Object]) -> _GroundCausalProcess:
-        pass
+        """Ground this process with the given objects."""
 
     @abc.abstractmethod
     def copy(self) -> CausalProcess:
         """Create a deep copy of this causal process."""
-        pass
 
     @abc.abstractmethod
     def filter_predicates(self, kept: Collection[Predicate]) -> CausalProcess:
@@ -2665,7 +2711,6 @@ class CausalProcess(abc.ABC):
         Note that the parameters must stay the same for the sake of the
         sampler inputs.
         """
-        pass
 
     def _set_parameters(self, parameters: Sequence[float],
                         **kwargs: Any) -> None:
@@ -2689,8 +2734,8 @@ class CausalProcess(abc.ABC):
         ] + self.delay_distribution.get_parameters()  # type: ignore[operator]
 
     def delay_probability(self, delay: int) -> float:
-        return self.delay_distribution.probability(
-            delay)  # type: ignore[attr-defined]
+        """Compute the probability of a given delay."""
+        return self.delay_distribution.probability(delay)
 
     @cached_property
     def _hash(self) -> int:
@@ -2702,9 +2747,10 @@ class CausalProcess(abc.ABC):
     @cached_property
     def _str(self) -> str:
         ignore_effects_str = ""
-        if hasattr(self, 'ignore_effects') and isinstance(
-                self.ignore_effects, set):
-            ignore_effects_str = f"\n    Ignore Effects: {sorted(self.ignore_effects, key=str)}"
+        ign = getattr(self, 'ignore_effects', None)
+        if isinstance(ign, set):
+            ign_sorted = sorted(ign, key=str)
+            ignore_effects_str = (f"\n    Ignore Effects: {ign_sorted}")
         return f"""    Parameters: {self.parameters}
     Conditions at start: {sorted(self.condition_at_start, key=str)}
     Conditions overall: {sorted(self.condition_overall, key=str)}
@@ -2753,6 +2799,7 @@ class CausalProcess(abc.ABC):
 
 @dataclass(frozen=False, repr=False, eq=False)
 class ExogenousProcess(CausalProcess):
+    """An exogenous causal process."""
 
     def copy(self) -> ExogenousProcess:
         """Create a deep copy of this exogenous process."""
@@ -2764,8 +2811,7 @@ class ExogenousProcess(CausalProcess):
             condition_at_end=self.condition_at_end.copy(),
             add_effects=self.add_effects.copy(),
             delete_effects=self.delete_effects.copy(),
-            delay_distribution=self.delay_distribution.copy(
-            ),  # type: ignore[attr-defined]
+            delay_distribution=self.delay_distribution.copy(),
             strength=self.strength.clone())
 
     def filter_predicates(self,
@@ -2816,6 +2862,7 @@ class ExogenousProcess(CausalProcess):
 
 @dataclass(frozen=False, repr=False, eq=False)
 class EndogenousProcess(CausalProcess):
+    """An endogenous causal process tied to an option."""
     option: ParameterizedOption
     option_vars: Sequence[Variable]
     _sampler: NSRTSampler = field(repr=False)
@@ -2831,10 +2878,9 @@ class EndogenousProcess(CausalProcess):
             condition_at_end=self.condition_at_end.copy(),
             add_effects=self.add_effects.copy(),
             delete_effects=self.delete_effects.copy(),
-            delay_distribution=self.delay_distribution.copy(
-            ),  # type: ignore[attr-defined]
+            delay_distribution=self.delay_distribution.copy(),
             strength=self.strength.clone(),
-            option=self.option.copy(),  # type: ignore[attr-defined]
+            option=copy.copy(self.option),
             option_vars=self.option_vars.copy(),  # type: ignore[attr-defined]
             _sampler=self._sampler.copy(),  # type: ignore[attr-defined]
             ignore_effects=self.ignore_effects.copy(),
@@ -2917,6 +2963,7 @@ class _GroundCausalProcess:
     @abc.abstractmethod
     def cause_triggered(self, state_history: List[Set[GroundAtom]],
                         action_history: List[_Option]) -> bool:
+        """Check if this process's cause was triggered."""
         raise NotImplementedError
 
     def effect_factor(self, state: Set[GroundAtom]) -> float:
@@ -2992,6 +3039,7 @@ class _GroundCausalProcess:
         return str(self) > str(other)
 
     def name_and_objects_str(self) -> str:
+        """Return a string with the process name and objects."""
         return f"{self.name}({', '.join([str(o) for o in self.objects])})"
 
 
@@ -3004,7 +3052,8 @@ class _GroundEndogenousProcess(_GroundCausalProcess):
     @property
     def ignore_effects(self) -> Set[Predicate]:
         """Ignore effects from the parent."""
-        return self.parent.ignore_effects  # type: ignore[attr-defined]
+        # pylint: disable-next=no-member
+        return self.parent.ignore_effects  # type: ignore
 
     @cached_property
     def _str(self) -> str:
@@ -3024,7 +3073,7 @@ class _GroundEndogenousProcess(_GroundCausalProcess):
         """Check if this endogenous process was triggered by the last
         action."""
 
-        def check_wo_s(state: Set[GroundAtom], action: _Option) -> bool:
+        def check_wo_s(_state: Set[GroundAtom], action: _Option) -> bool:
             return (action.parent == self.option
                     and action.objects == self.option_objs)
 

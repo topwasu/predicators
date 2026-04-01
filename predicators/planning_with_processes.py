@@ -1,3 +1,5 @@
+"""Planning with processes module."""
+# pylint: disable=redefined-outer-name
 from __future__ import annotations
 
 import heapq as hq
@@ -9,8 +11,8 @@ from copy import deepcopy
 from dataclasses import dataclass
 from itertools import islice
 from pprint import pformat
-from typing import Callable, Collection, Dict, Iterator, List, Optional, Set, \
-    Tuple
+from typing import Any, Callable, Collection, Dict, Iterator, List, Optional, \
+    Set, Tuple
 
 import numpy as np
 
@@ -46,16 +48,17 @@ def _build_exogenous_process_index(
 
 
 def get_reachable_atoms_from_processes(
-        ground_processes: List[_GroundCausalProcess],
-        atoms: Set[GroundAtom],
-        derived_predicates: Set[DerivedPredicate] = set(),
-        objects: Set[Object] = set(),
+    ground_processes: List[_GroundCausalProcess],
+    atoms: Set[GroundAtom],
+    derived_predicates: Optional[Set[DerivedPredicate]] = None,
+    objects: Optional[Set[Object]] = None,
 ) -> Set[GroundAtom]:
     """Get all atoms that are reachable from the init atoms using ground
     processes.
 
-    This function builds a relaxed planning graph by applying exogenous processes
-    and derived predicates similar to when building the relaxed planning graph
+    This function builds a relaxed planning graph by applying
+    exogenous processes and derived predicates similar to when
+    building the relaxed planning graph
     in the ff_heuristic.
 
     Args:
@@ -67,7 +70,12 @@ def get_reachable_atoms_from_processes(
     Returns:
         Set of all reachable atoms
     """
-    # Pre-compute dependencies for incremental derived predicates
+    if derived_predicates is None:
+        derived_predicates = set()
+    if objects is None:
+        objects = set()
+    # Pre-compute dependencies for incremental
+    # derived predicates
     dep_to_derived_preds: Dict[Predicate,
                                List[DerivedPredicate]] = defaultdict(list)
     if derived_predicates:
@@ -100,7 +108,8 @@ def get_reachable_atoms_from_processes(
                     newly_added_primitive_facts.update(new_effects)
                     reachable_atoms.update(new_effects)
 
-        # Handle derived predicates incrementally if we added new primitive facts
+        # Handle derived predicates incrementally
+        # if we added new primitive facts
         if newly_added_primitive_facts and derived_predicates:
             newly_derived_facts = _run_incremental_derived_predicate_logic(
                 newly_added_primitive_facts,
@@ -124,16 +133,15 @@ def process_task_plan_grounding(
     cps: Collection[CausalProcess],
     allow_waits: bool = True,
     compute_reachable_atoms: bool = False,
-    derived_predicates: Set[DerivedPredicate] = set(),
+    derived_predicates: Optional[Set[DerivedPredicate]] = None,
 ) -> Tuple[List[_GroundCausalProcess], Set[GroundAtom]]:
-    """Ground all operators for task planning into dummy _GroundNSRTs,
-    filtering out ones that are unreachable or have empty effects.
+    """Ground all operators for task planning.
 
-    Also return the set of reachable atoms, which is used by task
-    planning to quickly determine if a goal is unreachable.
-
-    See the task_plan docstring for usage instructions.
+    Filter out unreachable or empty-effect operators. Also return the
+    set of reachable atoms.
     """
+    if derived_predicates is None:
+        derived_predicates = set()
     ground_cps = []
     for cp in sorted(cps):
         for ground_cp in utils.all_ground_nsrts(cp, objects):
@@ -142,8 +150,10 @@ def process_task_plan_grounding(
                 ground_cps.append(ground_cp)
     if compute_reachable_atoms:
         reachable_atoms = get_reachable_atoms_from_processes(
-            ground_cps, init_atoms, derived_predicates,
-            objects)  # type: ignore[arg-type]
+            ground_cps,  # type: ignore[arg-type]
+            init_atoms,
+            derived_predicates,
+            objects)
     else:
         reachable_atoms = set()
 
@@ -172,18 +182,20 @@ class _ProcessPlanningNode():
 
 
 class ProcessWorldModel:
+    """Simulates process execution for planning."""
 
     def __init__(
         self,
         ground_processes: List[_GroundCausalProcess],
         state: Set[GroundAtom],
-        state_history: List[Set[GroundAtom]] = [],
-        action_history: List[Optional[_GroundEndogenousProcess]] = [],
-        scheduled_events: Dict[int, List[Tuple[_GroundCausalProcess,
-                                               int]]] = {},
+        state_history: Optional[List[Set[GroundAtom]]] = None,
+        action_history: Optional[List[
+            Optional[_GroundEndogenousProcess]]] = None,
+        scheduled_events: Optional[Dict[int, List[Tuple[_GroundCausalProcess,
+                                                        int]]]] = None,
         t: int = 0,
-        derived_predicates: Set[DerivedPredicate] = set(),
-        objects: Set[Object] = set(),
+        derived_predicates: Optional[Set[DerivedPredicate]] = None,
+        objects: Optional[Set[Object]] = None,
         precondition_to_exogenous_processes: Optional[Dict[
             Predicate, List[_GroundExogenousProcess]]] = None,
         dep_to_derived_preds: Optional[Dict[Predicate,
@@ -192,7 +204,17 @@ class ProcessWorldModel:
 
         self.ground_processes = ground_processes
         self.state = state
+        if state_history is None:
+            state_history = []
         self.state_history = state_history
+        if action_history is None:
+            action_history = []
+        if scheduled_events is None:
+            scheduled_events = {}
+        if derived_predicates is None:
+            derived_predicates = set()
+        if objects is None:
+            objects = set()
         self.current_action: Optional[_GroundEndogenousProcess] = None
         self.action_history = action_history
         self.scheduled_events: Dict[int, List[Tuple[_GroundCausalProcess,
@@ -205,11 +227,13 @@ class ProcessWorldModel:
         self._precondition_to_exogenous_processes: Dict[
             Predicate, List[_GroundExogenousProcess]]
         if precondition_to_exogenous_processes is not None:
-            self._precondition_to_exogenous_processes = precondition_to_exogenous_processes
+            self._precondition_to_exogenous_processes = (
+                precondition_to_exogenous_processes)
         elif CFG.build_exogenous_process_index_for_planning:
-            # Fallback: build the index if not provided and CFG allows it
-            self._precondition_to_exogenous_processes = _build_exogenous_process_index(
-                self.ground_processes)
+            # Fallback: build the index if not provided
+            # and CFG allows it
+            self._precondition_to_exogenous_processes = (
+                _build_exogenous_process_index(self.ground_processes))
         else:
             # Don't build the index
             self._precondition_to_exogenous_processes = defaultdict(list)
@@ -221,7 +245,8 @@ class ProcessWorldModel:
             # Fallback: build the index if not provided
             self._dep_to_derived_preds = defaultdict(list)
             for der_pred in self.derived_predicates:
-                for aux_pred in der_pred.auxiliary_predicates:  # type: ignore[union-attr]
+                assert der_pred.auxiliary_predicates is not None
+                for aux_pred in der_pred.auxiliary_predicates:
                     self._dep_to_derived_preds[aux_pred].append(der_pred)
 
     def small_step(
@@ -271,7 +296,8 @@ class ProcessWorldModel:
 
                 # Only update if the primitive facts have changed.
                 if primitive_facts_before != primitive_facts_after:
-                    deleted_facts = primitive_facts_before - primitive_facts_after
+                    deleted_facts = (primitive_facts_before -
+                                     primitive_facts_after)
 
                     # If any primitive fact was deleted, a full re-computation
                     # is the safest way to ensure correctness.
@@ -288,11 +314,14 @@ class ProcessWorldModel:
 
                     # Otherwise, only additions occurred; we can be incremental.
                     else:
-                        added_facts = primitive_facts_after - primitive_facts_before
-                        # `existing_facts` includes primitive and derived facts
-                        # before the new additions.
-                        existing_facts_before_increment = self.state - added_facts
-                        newly_derived_facts = _run_incremental_derived_predicate_logic(
+                        added_facts = (primitive_facts_after -
+                                       primitive_facts_before)
+                        # existing_facts includes primitive
+                        # and derived facts before additions.
+                        existing_facts_before_increment = (self.state -
+                                                           added_facts)
+                        fn = _run_incremental_derived_predicate_logic
+                        newly_derived_facts = fn(
                             added_facts, existing_facts_before_increment,
                             self.objects, self._dep_to_derived_preds)
                         self.state.update(newly_derived_facts)
@@ -301,9 +330,9 @@ class ProcessWorldModel:
         # 3a. Handle the endogenous process (action) passed to this step.
         # This is for starting a new action.
         if (small_step_action is not None
+                and isinstance(small_step_action.parent, EndogenousProcess)
                 and small_step_action.parent.option.name != 'Wait'
-                and  # type: ignore[attr-defined]
-                small_step_action.condition_at_start.issubset(self.state)):
+                and small_step_action.condition_at_start.issubset(self.state)):
             delay = small_step_action.delay_distribution.sample()
             delay = max(1, delay)
             scheduled_time = self.t + delay
@@ -385,10 +414,10 @@ class ProcessWorldModel:
             action_not_finished = self.current_action is not None
 
             # if currently executing Wait and state has changed, then break
-            if (self.current_action is not None
+            if (self.current_action is not None and isinstance(
+                    self.current_action.parent, EndogenousProcess)
                     and self.current_action.parent.option.name == 'Wait'
-                    and  # type: ignore[attr-defined]
-                    self.state != initial_state):
+                    and self.state != initial_state):
                 break
         return self.state
 
@@ -409,10 +438,14 @@ def _skeleton_generator_with_processes(
     log_heuristic: bool = False,
     time_heuristic: bool = True,
     heuristic_weight: float = 10,
-    derived_predicates: Set[DerivedPredicate] = set(),
-    objects: Set[Object] = set(),
+    derived_predicates: Optional[Set[DerivedPredicate]] = None,
+    objects: Optional[Set[Object]] = None,
 ) -> Iterator[Tuple[List[_GroundEndogenousProcess], List[Set[GroundAtom]]]]:
 
+    if derived_predicates is None:
+        derived_predicates = set()
+    if objects is None:
+        objects = set()
     # Filter out all the action from processes
     # zero heuristic
     objects = objects.copy()
@@ -429,7 +462,8 @@ def _skeleton_generator_with_processes(
     dep_to_derived_preds: Dict[Predicate,
                                List[DerivedPredicate]] = defaultdict(list)
     for der_pred in derived_predicates:
-        for aux_pred in der_pred.auxiliary_predicates:  # type: ignore[union-attr]
+        assert der_pred.auxiliary_predicates is not None
+        for aux_pred in der_pred.auxiliary_predicates:
             dep_to_derived_preds[aux_pred].append(der_pred)
     # --- End index building ---
     ground_action_processes = [
@@ -521,10 +555,12 @@ def _skeleton_generator_with_processes(
 
             # Log heuristic timing stats when a solution is found
             if time_heuristic:
-                average_heuristic_time = total_heuristic_time / heuristic_call_count if heuristic_call_count > 0 else 0.0
-                logging.debug(
-                    f"Heuristic timing stats - Calls: {heuristic_call_count}, Total time: {total_heuristic_time:.4f}s, Average time: {average_heuristic_time:.4f}s"
-                )
+                average_heuristic_time = total_heuristic_time / \
+                    heuristic_call_count if heuristic_call_count > 0 else 0.0
+                logging.debug(f"Heuristic timing stats - "
+                              f"Calls: {heuristic_call_count}, "
+                              f"Total: {total_heuristic_time:.4f}s, "
+                              f"Avg: {average_heuristic_time:.4f}s")
 
             yield node.skeleton, node.atoms_sequence
         else:
@@ -542,15 +578,12 @@ def _skeleton_generator_with_processes(
                                                      objects, task.goal)
                     if ground_process is None:
                         break
-                    # Make sure ground_process is applicable and is an endogenous process
-                    if not isinstance(ground_process,
-                                      _GroundEndogenousProcess):
-                        break  # type: ignore[unreachable]
                     if not ground_process.condition_at_start.issubset(
                             current_node.atoms):
                         break
 
-                    # Run the process through the world model to get the resulting state
+                    # Run the process through the world model
+                    # to get the resulting state
                     world_model = ProcessWorldModel(
                         ground_processes=ground_processes.copy(),
                         state=current_node.atoms.copy(),
@@ -609,14 +642,14 @@ def _skeleton_generator_with_processes(
                     current_node = child_node
                     if time.perf_counter() - start_time >= timeout:
                         break
-            applicable_actions = list(
+            applicable_actions: List[Any] = list(
                 utils.get_applicable_operators(ground_action_processes,
                                                node.atoms))
 
             # Domain-specific pruning for domino environment
             if CFG.env == "pybullet_domino_grid" and CFG.domino_prune_actions:
                 # Filter out backwards placements and redundant picks
-                filtered_actions = []
+                filtered_actions: List[Any] = []
                 placed_dominos = set()  # Track which dominos have been placed
 
                 # First pass: identify already placed dominos
@@ -626,30 +659,31 @@ def _skeleton_generator_with_processes(
                         if len(prev_action.objects) > 1:
                             placed_dominos.add(prev_action.objects[1])
 
-                for action in applicable_actions:  # type: ignore[assignment]
+                for action in applicable_actions:
+                    assert action is not None
                     # Always keep Wait and Push actions
-                    if action.parent.name in ["Wait", "PushStartBlock"
-                                              ]:  # type: ignore[union-attr]
+                    if action.parent.name in ["Wait", "PushStartBlock"]:
                         filtered_actions.append(action)
                     # For Pick, only pick dominos that haven't been placed yet
-                    elif action.parent.name == "PickDomino":  # type: ignore[union-attr]
-                        domino_to_pick = action.objects[
-                            1] if len(  # type: ignore[union-attr]
-                                action.objects
-                            ) > 1 else None  # type: ignore[union-attr]
-                        if domino_to_pick and domino_to_pick not in placed_dominos:
+                    elif action.parent.name == "PickDomino":
+                        domino_to_pick = action.objects[1] if len(
+                            action.objects) > 1 else None
+                        if domino_to_pick and \
+                                domino_to_pick not in placed_dominos:
                             filtered_actions.append(action)
                     # For Place, apply heuristics
-                    elif action.parent.name == "PlaceDomino":  # type: ignore[union-attr]
-                        # Keep all place actions for now, but could add more pruning
-                        # E.g., only place in forward direction, avoid cycles, etc.
+                    elif action.parent.name == "PlaceDomino":
+                        # Keep all place actions for now,
+                        # but could add more pruning.
+                        # E.g., only place in forward
+                        # direction, avoid cycles, etc.
                         filtered_actions.append(action)
                     else:
                         filtered_actions.append(action)
 
                 # If pruning removed all actions, fall back to unpruned
                 if filtered_actions:
-                    applicable_actions = filtered_actions  # type: ignore[assignment]
+                    applicable_actions = filtered_actions
 
             for action_process in applicable_actions:
 
@@ -668,15 +702,7 @@ def _skeleton_generator_with_processes(
                     dep_to_derived_preds=dep_to_derived_preds)
 
                 assert isinstance(action_process, _GroundEndogenousProcess)
-                # plan_so_far = [p.name for p in node.skeleton]
-                # plan_so_far = [p.name_and_objects_str() for p in node.skeleton]
-                # logging.debug(f"Expand after plan {plan_so_far}:")
-                # applicable_actions = list(utils.get_applicable_operators(
-                #     ground_action_processes, node.atoms))
-                # num_applicable_actions = len(applicable_actions)
-                # logging.debug(f"Num applicable actions: {num_applicable_actions}")
-                # logging.debug(f"Taking action: {action_process.name_and_objects_str()}")
-                # action_names = [p.name_and_objects_str() for p in node.skeleton]
+                # (debug logging removed)
                 # # action_names = [p.name for p in node.skeleton]
                 # # target_action_names = ['PickJugFromOutsideFaucetAndBurner',
                 # #                        'PlaceUnderFaucet',
@@ -691,14 +717,10 @@ def _skeleton_generator_with_processes(
                 # #                        'SwitchBurnerOn',
                 # #                        ]
                 # target_action_names = [
-                #                     # Update with new location naming format: loc_x.xx_y.yy
-                #                     # 'PickDomino(robot:robot, domino_1:domino, loc_0.49_1.23:loc, ang_0:angle)',
-                #                     # 'PlaceDomino(robot:robot, domino_2:domino, domino_3:domino, pos_y0_x2:loc, rot_135:rot)',
-                #                     # 'PickDomino(robot:robot, domino_1:domino, pos_y0_x0:loc, rot_0:rot)',
-                #                     # 'PlaceDomino(robot:robot, domino_1:domino, domino_0:domino, pos_y1_x2:loc, rot_180:rot',
-                #                     ]
-                # # if action_names == target_action_names:# and \
-                #     # action_process.name_and_objects_str() == 'PlaceDomino(robot:robot, domino_1:domino, domino_0:domino, loc_x1_y0:loc, ang_-90:angle)':
+                #     # (debug action names removed)
+                #     ]
+                # # if action_names == target:
+                #     # (debug condition removed)
                 # if False:  # Update with actual action string when debugging
                 # # if action_names == target_action_names:
                 #     breakpoint()
@@ -751,7 +773,8 @@ def _skeleton_generator_with_processes(
                     logging.debug(f"Planning timeout of {timeout} reached.")
                     break
     if time_heuristic:
-        average_heuristic_time = total_heuristic_time / heuristic_call_count if heuristic_call_count > 0 else 0.0
+        average_heuristic_time = total_heuristic_time / \
+            heuristic_call_count if heuristic_call_count > 0 else 0.0
         logging.debug(
             f"Heuristic timing stats - Calls: {heuristic_call_count}, "
             f"Total time: {total_heuristic_time:.4f}s, "
@@ -777,6 +800,7 @@ def task_plan_from_task(
     max_policy_guided_rollout: int = 0,
 ) -> Iterator[Tuple[List[_GroundEndogenousProcess], List[Set[GroundAtom]],
                     Metrics]]:
+    """Task plan from task."""
     predicates_set = set(predicates)
     all_predicates = utils.add_in_auxiliary_predicates(predicates_set)
     derived_predicates = utils.get_derived_predicates(all_predicates)
@@ -797,9 +821,13 @@ def task_plan_from_task(
         derived_predicates=derived_predicates)
 
     if CFG.process_task_planning_heuristic == "goal_count":
-        heuristic = utils.create_task_planning_heuristic(  # type: ignore[type-var]
-            CFG.process_task_planning_heuristic, init_atoms, goal,
-            ground_processes, all_predicates, objects)
+        heuristic = utils.create_task_planning_heuristic(
+            CFG.process_task_planning_heuristic,
+            init_atoms,  # type: ignore[type-var]
+            goal,
+            ground_processes,
+            all_predicates,
+            objects)
     elif CFG.process_task_planning_heuristic == "lm_cut":
         heuristic = create_lm_cut_heuristic(  # type: ignore[assignment]
             goal,
@@ -823,9 +851,9 @@ def task_plan_from_task(
             objects,
             use_derived_predicates=CFG.use_derived_predicate_in_heuristic)
     else:
-        raise ValueError(
-            f"Unrecognized process_task_planning_heuristic: {CFG.process_task_planning_heuristic}"
-        )
+        raise ValueError("Unrecognized "
+                         "process_task_planning_heuristic: "
+                         f"{CFG.process_task_planning_heuristic}")
 
     return task_plan(
         init_atoms,
@@ -854,29 +882,39 @@ def task_plan(
     timeout: float,
     max_skeletons_optimized: int,
     use_visited_state_set: bool = True,
-    derived_predicates: Set[DerivedPredicate] = set(),
-    objects: Set[Object] = set(),
+    derived_predicates: Optional[Set[DerivedPredicate]] = None,
+    objects: Optional[Set[Object]] = None,
     abstract_policy: Optional[AbstractProcessPolicy] = None,
     max_policy_guided_rollout: int = 0,
 ) -> Iterator[Tuple[List[_GroundEndogenousProcess], List[Set[GroundAtom]],
                     Metrics]]:
-    """Run only the task planning portion of SeSamE. A* search is run, and
-    skeletons that achieve the goal symbolically are yielded. Specifically,
-    yields a tuple of (skeleton, atoms sequence, metrics dictionary).
+    """Run task planning portion of SeSamE.
 
-    This method is NOT used by SeSamE, but is instead provided as a
-    convenient wrapper around _skeleton_generator below (which IS used
-    by SeSamE) that takes in only the minimal necessary arguments.
+    A* search is run, and skeletons that achieve the
+    goal symbolically are yielded. Specifically, yields
+    a tuple of (skeleton, atoms sequence, metrics dict).
 
-    This method is tightly coupled with task_plan_grounding -- the reason they
-    are separate methods is that it is sometimes possible to ground only once
-    and then plan multiple times (e.g. from different initial states, or to
+    This method is NOT used by SeSamE, but is instead
+    provided as a convenient wrapper around
+    _skeleton_generator below (which IS used by SeSamE)
+    that takes in only the minimal necessary arguments.
+
+    This method is tightly coupled with
+    task_plan_grounding -- the reason they are separate
+    methods is that it is sometimes possible to ground
+    only once and then plan multiple times (e.g. from
+    different initial states, or to
     different goals). To run task planning once, call task_plan_grounding to
     get ground_nsrts and reachable_atoms; then create a heuristic using
     utils.create_task_planning_heuristic; then call this method. See the tests
     in tests/test_planning for usage examples.
     """
-    if CFG.planning_check_dr_reachable and not goal.issubset(reachable_atoms):
+    if derived_predicates is None:
+        derived_predicates = set()
+    if objects is None:
+        objects = set()
+    if CFG.planning_check_dr_reachable and \
+            not goal.issubset(reachable_atoms):
         logging.info(f"Detected goal unreachable. Goal: {goal}")
         logging.info(f"Initial atoms: {init_atoms}")
         raise PlanningFailure(f"Goal {goal} not dr-reachable")
@@ -910,12 +948,12 @@ def run_task_plan_with_processes_once(
     task: Task,
     processes: Set[CausalProcess],
     preds: Set[Predicate],
-    types: Set[Type],
+    _types: Set[Type],
     timeout: float,
     seed: int,
-    task_planning_heuristic: str,
+    _task_planning_heuristic: str,
     max_horizon: float = np.inf,
-    compute_reachable_atoms: bool = False,
+    _compute_reachable_atoms: bool = False,
     abstract_policy: Optional[AbstractProcessPolicy] = None,
     max_policy_guided_rollout: int = 0,
 ) -> Tuple[List[_GroundEndogenousProcess], List[Set[GroundAtom]], Metrics]:
@@ -929,7 +967,7 @@ def run_task_plan_with_processes_once(
     if CFG.sesame_task_planner == "astar":
         duration = time.perf_counter() - start_time
         timeout -= duration
-        plan, atoms_seq, metrics = next(
+        plan, _atoms_seq, metrics = next(
             task_plan_from_task(
                 task,
                 preds,
@@ -1038,13 +1076,16 @@ def sesame_plan_with_processes(
 def create_ff_heuristic(
     goal: Set[GroundAtom],
     ground_processes: List[_GroundCausalProcess],
-    derived_predicates: Set[DerivedPredicate] = set(),
-    objects: Set[Object] = set(),
+    derived_predicates: Optional[Set[DerivedPredicate]] = None,
+    objects: Optional[Set[Object]] = None,
     use_derived_predicates: bool = True,
     debug_log: bool = False,
 ) -> Callable[[Set[GroundAtom]], float]:
-    """Creates a callable FF heuristic function with efficient RPG
-    generation."""
+    """Creates a callable FF heuristic."""
+    if derived_predicates is None:
+        derived_predicates = set()
+    if objects is None:
+        objects = set()
 
     adds_map: Dict[GroundAtom, List[_GroundCausalProcess]] = defaultdict(list)
     for process in ground_processes:
@@ -1057,7 +1098,7 @@ def create_ff_heuristic(
     if use_derived_predicates:
         for der_pred in derived_predicates:
             assert der_pred.auxiliary_predicates is not None, \
-                f"Can't find auxiliary predicates for derived predicate " +\
+                "Can't find auxiliary predicates for derived predicate " +\
                 f"{der_pred.name}"
             for aux_pred in der_pred.auxiliary_predicates:
                 dep_to_derived_preds[aux_pred].append(der_pred)
@@ -1089,7 +1130,8 @@ def create_ff_heuristic(
                 count += 1
             current_facts = fact_layers[-1]
 
-            # Find all processes whose preconditions are met in the current layer.
+            # Find all processes whose preconditions
+            # are met in the current layer.
             applicable_processes: Set[_GroundCausalProcess] = set()
             for process in ground_processes:
                 if process.condition_at_start.issubset(current_facts):
@@ -1105,9 +1147,8 @@ def create_ff_heuristic(
 
             newly_added_primitive_facts = primitive_add_effects - current_facts
             if debug_log:
-                logging.debug(
-                    f"Newly added primitive facts: {sorted(newly_added_primitive_facts)}"
-                )
+                logging.debug("Newly added primitive facts: "
+                              f"{sorted(newly_added_primitive_facts)}")
 
             # b) Incrementally compute new derived facts.
             newly_derived_facts = set()
@@ -1125,7 +1166,9 @@ def create_ff_heuristic(
                         f"Newly derived facts: {sorted(newly_derived_facts)}\n"
                     )
 
-            next_facts = current_facts | newly_added_primitive_facts | newly_derived_facts
+            next_facts = (current_facts
+                          | newly_added_primitive_facts
+                          | newly_derived_facts)
 
             # If the new layer is identical to the old one, we've stagnated.
             if next_facts == current_facts:
@@ -1142,20 +1185,23 @@ def create_ff_heuristic(
             if use_derived_predicates:
                 for subgoal in subgoals_to_achieve.copy():
                     # Case 1: The subgoal is a DERIVED predicate.
-                    # It is achieved 'for free' by its supporting auxiliary predicates.
+                    # It is achieved 'for free' by its
+                    # supporting auxiliary predicates.
                     if isinstance(subgoal.predicate, DerivedPredicate):
-                        # The new subgoals are the auxiliary predicates that support it.
-                        # In a relaxed plan, we conservatively add all atoms from the
+                        # The new subgoals are the auxiliary
+                        # predicates that support it.
+                        # In a relaxed plan, we conservatively
+                        # add all atoms from the
                         # previous layer that could be supporters.
                         try:
                             supporter_predicates =\
                                 utils.get_base_supporter_predicates(
                                     subgoal.predicate)
                         except Exception as e:
-                            logging.error(
-                                f"Error getting base supporter predicates for {subgoal.predicate}: {e}"
-                            )
-                            breakpoint()
+                            logging.error("Error getting base supporter "
+                                          f"predicates for "
+                                          f"{subgoal.predicate}: {e}")
+                            raise
                         new_subgoals = {
                             atom
                             for atom in fact_layers[i - 1]
@@ -1177,7 +1223,8 @@ def create_ff_heuristic(
                     if debug_log:
                         logging.debug(f"Considering subgoal: {subgoal}")
 
-                    # Case 2: The subgoal is a PRIMITIVE predicate (original logic).
+                    # Case 2: The subgoal is a PRIMITIVE
+                    # predicate (original logic).
                     best_supporter = None
                     # Find a process from the previous layer that achieves it.
                     for process in adds_map.get(subgoal, []):
@@ -1190,12 +1237,14 @@ def create_ff_heuristic(
                             break
 
                     if best_supporter:
-                        # Only agent actions (endogenous) contribute to the plan cost.
+                        # Only agent actions (endogenous)
+                        # contribute to the plan cost.
                         if isinstance(best_supporter,
                                       _GroundEndogenousProcess):
                             relaxed_plan_actions.add(best_supporter)
 
-                        # Add the supporter's preconditions to our set of subgoals.
+                        # Add the supporter's preconditions
+                        # to our set of subgoals.
                         subgoals_to_achieve.update(
                             best_supporter.condition_at_start)
                         subgoals_to_achieve.discard(subgoal)
@@ -1208,21 +1257,22 @@ def create_ff_heuristic(
 def create_lm_cut_heuristic(
     goal: Set[GroundAtom],
     ground_processes: List[_GroundCausalProcess],
-    derived_predicates: Set[DerivedPredicate] = set(),
-    objects: Set[Object] = set(),
+    derived_predicates: Optional[Set[DerivedPredicate]] = None,
+    objects: Optional[Set[Object]] = None,
     use_derived_predicates: bool = True,
 ) -> Callable[[Set[GroundAtom]], float]:
     """Creates a callable LM-cut heuristic function.
 
     This heuristic iteratively finds landmarks by computing a relaxed
     plan, calculating its cost, and then assuming its effects have been
-    achieved before solving for the next landmark. This is a practical
-    implementation of the LM-cut principle. It also correctly handles
-    exogenous processes and derived predicates (axioms) as zero-cost
-    events.
+    achieved before solving for the next landmark.
     """
+    if derived_predicates is None:
+        derived_predicates = set()
+    if objects is None:
+        objects = set()
 
-    # --- Pre-computation to speed up sub-problems ---
+    # --- Pre-computation ---
     adds_map: Dict[GroundAtom, List[_GroundCausalProcess]] = defaultdict(list)
     for process in ground_processes:
         for atom in process.add_effects:
@@ -1233,7 +1283,8 @@ def create_lm_cut_heuristic(
                                List[DerivedPredicate]] = defaultdict(list)
     if use_derived_predicates:
         for der_pred in derived_predicates:
-            for aux_pred in der_pred.auxiliary_predicates:  # type: ignore[union-attr]
+            assert der_pred.auxiliary_predicates is not None
+            for aux_pred in der_pred.auxiliary_predicates:
                 dep_to_derived_preds[aux_pred].append(der_pred)
     # --- CHANGE END ---
 
@@ -1281,7 +1332,9 @@ def create_lm_cut_heuristic(
                 )
                 # --- CHANGE END ---
 
-            next_facts = current_facts | newly_added_primitive_facts | newly_derived_facts
+            next_facts = (current_facts
+                          | newly_added_primitive_facts
+                          | newly_derived_facts)
 
             if next_facts == current_facts:
                 return float('inf'), set()
@@ -1313,7 +1366,8 @@ def create_lm_cut_heuristic(
         for process in relaxed_plan:
             # Endogenous processes (agent actions) have a cost.
             if isinstance(process, _GroundEndogenousProcess):
-                # Use axiom_cost if it's a derived predicate axiom, otherwise default to 1.
+                # Use axiom_cost if it's a derived
+                # predicate axiom, else default to 1.
                 cost += getattr(process, 'axiom_cost', 1.0)
 
         return cost, relaxed_plan
@@ -1345,9 +1399,11 @@ def create_lm_cut_heuristic(
 
             total_cost += landmark_cost
 
-            # "Apply" the landmark by adding the effects of its plan to our state.
+            # "Apply" the landmark by adding the effects
+            # of its plan to our state.
             if not landmark_plan:
-                # Should not be reachable if cost is not inf, but as a safeguard...
+                # Should not be reachable if cost is
+                # not inf, but as a safeguard...
                 return float('inf')
 
             for process in landmark_plan:
@@ -1361,27 +1417,27 @@ def create_lm_cut_heuristic(
 def create_h_max_heuristic(
     goal: Set[GroundAtom],
     ground_processes: List[_GroundCausalProcess],
-    derived_predicates: Set[DerivedPredicate] = set(),
-    objects: Set[Object] = set(),
+    derived_predicates: Optional[Set[DerivedPredicate]] = None,
+    objects: Optional[Set[Object]] = None,
     use_derived_predicates: bool = True,
 ) -> Callable[[Set[GroundAtom]], float]:
     """Creates a callable h_max heuristic function.
 
-    This heuristic is compatible with exogenous processes (zero-cost)
-    and derived predicates (zero-cost). It works by building a Relaxed
-    Planning Graph (RPG) and finding the maximum cost to achieve any
-    single atom in the goal set. The cost of an atom is the cost of the
-    cheapest process that achieves it, where the cost of a process is
-    the maximum cost of any of its preconditions plus its own cost (1
-    for actions, 0 otherwise).
+    Compatible with exogenous processes (zero-cost) and derived
+    predicates (zero-cost).
     """
+    if derived_predicates is None:
+        derived_predicates = set()
+    if objects is None:
+        objects = set()
 
-    # Pre-computation for derived predicate dependencies.
+    # Pre-computation for derived predicate deps.
     dep_to_derived_preds: Dict[Predicate,
                                List[DerivedPredicate]] = defaultdict(list)
     if use_derived_predicates:
         for der_pred in derived_predicates:
-            for aux_pred in der_pred.auxiliary_predicates:  # type: ignore[union-attr]
+            assert der_pred.auxiliary_predicates is not None
+            for aux_pred in der_pred.auxiliary_predicates:
                 dep_to_derived_preds[aux_pred].append(der_pred)
 
     def _h_max_heuristic(atoms: Set[GroundAtom]) -> float:
@@ -1408,12 +1464,14 @@ def create_h_max_heuristic(
                 if precond_cost == float('inf'):
                     continue
 
-                # Actions (endogenous) have cost 1, others (exogenous) have cost 0.
+                # Actions (endogenous) have cost 1,
+                # others (exogenous) have cost 0.
                 process_cost = 1.0 if isinstance(
                     process, _GroundEndogenousProcess) else 0.0
                 total_cost = precond_cost + process_cost
 
-                # Update costs of effects if we found a cheaper way to achieve them.
+                # Update costs of effects if we found a
+                # cheaper way to achieve them.
                 for effect in process.add_effects:
                     if total_cost < atom_costs[effect]:
                         atom_costs[effect] = total_cost
@@ -1424,16 +1482,22 @@ def create_h_max_heuristic(
                 # We need to loop here to handle chains of derived predicates.
                 while True:
                     derived_costs_changed = False
-                    # This logic is a simplified version of the incremental approach,
-                    # adapted for h_max's cost propagation.
+                    # This logic is a simplified version of
+                    # the incremental approach, adapted for
+                    # h_max's cost propagation.
                     current_facts_for_eval = {
                         a
                         for a, c in atom_costs.items() if c != float('inf')
                     }
 
-                    # Check all derived predicates whose inputs might have changed.
-                    derived_atoms = utils._abstract_with_derived_predicates(
-                        current_facts_for_eval, derived_predicates, objects)
+                    # Check all derived predicates whose
+                    # inputs might have changed.
+                    # pylint: disable=protected-access
+                    _fn = utils \
+                        ._abstract_with_derived_predicates
+                    # pylint: enable=protected-access
+                    derived_atoms = _fn(current_facts_for_eval,
+                                        derived_predicates, objects)
 
                     for derived_atom in derived_atoms:
                         # To determine the cost, we need to find the specific
@@ -1449,12 +1513,17 @@ def create_h_max_heuristic(
                         # the 'holds' condition. We find the supporters by
                         # checking the auxiliary predicates.
                         supporter_atoms: Set[GroundAtom] = set()
-                        for p in derived_atom.predicate.auxiliary_predicates:  # type: ignore[attr-defined]
+                        assert isinstance(derived_atom.predicate,
+                                          DerivedPredicate)
+                        assert derived_atom.predicate.auxiliary_predicates \
+                            is not None
+                        for p in derived_atom.predicate.auxiliary_predicates:
                             supporter_atoms.update(
                                 a for a in current_facts_for_eval
                                 if a.predicate == p)
 
-                        if not supporter_atoms: continue
+                        if not supporter_atoms:
+                            continue
 
                         derived_cost = max(
                             [atom_costs[a] for a in supporter_atoms] or [0.0])
@@ -1467,7 +1536,8 @@ def create_h_max_heuristic(
                     if not derived_costs_changed:
                         break
 
-            # If no costs were updated in a full pass, we've reached a fixed point.
+            # If no costs were updated in a full pass,
+            # we've reached a fixed point.
             if not costs_changed:
                 break
 
@@ -1505,8 +1575,12 @@ def _run_incremental_derived_predicate_logic(
 
         current_state_for_eval = existing_facts | all_newly_derived_facts |\
                                     newly_added_facts
-        potential_new_atoms = utils._abstract_with_derived_predicates(
-            current_state_for_eval, derived_preds_to_check, objects)
+        # pylint: disable=protected-access
+        _fn = utils \
+            ._abstract_with_derived_predicates
+        # pylint: enable=protected-access
+        potential_new_atoms = _fn(current_state_for_eval,
+                                  derived_preds_to_check, objects)
 
         truly_new_atoms = potential_new_atoms - (existing_facts
                                                  | all_newly_derived_facts)
@@ -1535,10 +1609,10 @@ if __name__ == "__main__":
 
     env = PyBulletBoilEnv()
     # objects
-    robot = env._robot
-    faucet = env._faucet
-    jug1 = env._jugs[0]
-    burner1 = env._burners[0]
+    robot = env._robot  # pylint: disable=protected-access
+    faucet = env._faucet  # pylint: disable=protected-access
+    jug1 = env._jugs[0]  # pylint: disable=protected-access
+    burner1 = env._burners[0]  # pylint: disable=protected-access
 
     # Processes
     options = get_gt_options(env.get_name())
@@ -1564,15 +1638,18 @@ if __name__ == "__main__":
     predicates = env.predicates
 
     def policy() -> Optional[_GroundEndogenousProcess]:
-        global plan
+        """Policy."""
         if len(plan) > 0:
             return plan.pop(0)
-        else:
-            return None
+        return None
 
     # Task
     rng = np.random.default_rng(CFG.seed)
-    task = env._make_tasks(1, rng)[0]  # type: ignore[call-arg, arg-type]
+    task = env._make_tasks(  # pylint: disable=protected-access
+        1,
+        [1],
+        [1],  # type: ignore[call-arg, arg-type]
+        rng)[0]
     ground_processes, _reachable_atoms = process_task_plan_grounding(
         init_atoms=task.init,  # type: ignore[arg-type]
         objects=set(task.init),

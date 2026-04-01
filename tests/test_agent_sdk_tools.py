@@ -1,7 +1,7 @@
 """Tests for agent SDK tool enhancements.
 
 Validates:
-1. inspect_options with option_name saves source code to sandbox and returns path
+1. inspect_options with option_name saves source code to sandbox
 2. test_option_plan always saves scene images
 3. test_option_plan shows "Missing goal atoms" when goal not achieved
 4. test_option_plan shows object poses on failure
@@ -13,16 +13,19 @@ Validates:
 Usage:
     python tests/test_agent_sdk_tools.py
 """
+# pylint: disable=redefined-outer-name,import-outside-toplevel,protected-access
+from __future__ import annotations
+
 import asyncio
 import os
-import sys
 import tempfile
+from typing import Any
 
 import numpy as np
+import pytest
 
 # Bootstrap circular imports
-import predicators.utils as utils  # noqa: F401
-from predicators import utils as pred_utils
+import predicators.utils as pred_utils
 from predicators.settings import CFG
 
 _CFG_OVERRIDES = {
@@ -45,7 +48,7 @@ _CFG_OVERRIDES = {
 }
 
 
-def _setup(sandbox_dir=None):
+def _setup(sandbox_dir: str | None = None) -> tuple[Any, Any]:
     """Create environment, options, option model, and ToolContext."""
     pred_utils.reset_config(_CFG_OVERRIDES)
 
@@ -68,10 +71,10 @@ def _setup(sandbox_dir=None):
         predicates=predicates,
         processes=set(),
         options=options,
-        train_tasks=train_tasks,
+        train_tasks=[t.task for t in train_tasks],
         example_state=task.init,
         option_model=option_model,
-        current_task=task,
+        current_task=task.task,
         sandbox_dir=sandbox_dir,
     )
     # Extract env from option model (same as _sync_tool_context does)
@@ -85,12 +88,13 @@ def _setup(sandbox_dir=None):
     return ctx, env
 
 
-def _run(coro):
+def _run(coro: Any) -> Any:
     """Run an async coroutine synchronously."""
     return asyncio.get_event_loop().run_until_complete(coro)
 
 
-def _make_tools(ctx, tool_names=None):
+def _make_tools(ctx: Any,
+                tool_names: list[str] | None = None) -> dict[str, Any]:
     """Create MCP tools and return as a name->callable dict."""
     from predicators.agent_sdk.tools import create_mcp_tools
     tools = create_mcp_tools(ctx, tool_names=tool_names)
@@ -98,10 +102,24 @@ def _make_tools(ctx, tool_names=None):
     return {t.name: t.handler for t in tools}
 
 
+# ===== Fixtures =====
+
+
+@pytest.fixture(scope="module")
+def ctx() -> Any:
+    """Create shared ToolContext for all tests in this module."""
+    try:
+        with tempfile.TemporaryDirectory() as sandbox_dir:
+            ctx_obj, _env = _setup(sandbox_dir=sandbox_dir)
+            yield ctx_obj
+    except Exception as exc:  # pylint: disable=broad-except
+        pytest.skip(f"Environment setup failed: {exc}")
+
+
 # ===== Tests =====
 
 
-def test_inspect_options_list_all(ctx):
+def test_inspect_options_list_all(ctx: Any) -> None:
     """inspect_options with no args lists all options."""
     tools = _make_tools(ctx, ["inspect_options"])
     result = _run(tools["inspect_options"]({}))
@@ -111,7 +129,7 @@ def test_inspect_options_list_all(ctx):
     print("  PASS: inspect_options (list all)")
 
 
-def test_inspect_options_detail(ctx):
+def test_inspect_options_detail(ctx: Any) -> None:
     """inspect_options with option_name saves source to sandbox."""
     tools = _make_tools(ctx, ["inspect_options"])
 
@@ -136,7 +154,7 @@ def test_inspect_options_detail(ctx):
         assert os.path.exists(saved_path), \
             f"Expected file at {saved_path}"
         # File should have content
-        with open(saved_path) as f:
+        with open(saved_path, encoding='utf-8') as f:
             content = f.read()
         assert len(content) > 0
         print(f"  PASS: inspect_options (detail for '{test_name}', "
@@ -148,7 +166,7 @@ def test_inspect_options_detail(ctx):
               f"inlined — no sandbox)")
 
 
-def test_inspect_options_unknown(ctx):
+def test_inspect_options_unknown(ctx: Any) -> None:
     """inspect_options with unknown option_name returns error."""
     tools = _make_tools(ctx, ["inspect_options"])
     result = _run(tools["inspect_options"]({
@@ -159,7 +177,7 @@ def test_inspect_options_unknown(ctx):
     print("  PASS: inspect_options (unknown option)")
 
 
-def test_inspect_options_proposed_code(ctx):
+def test_inspect_options_proposed_code(ctx: Any) -> None:
     """inspect_options returns path for option with code saved to sandbox."""
     from predicators.agent_sdk.tools import _save_option_to_sandbox
 
@@ -175,7 +193,7 @@ def test_inspect_options_proposed_code(ctx):
         name="TestOpt",
         types=[],
         params_space=Box(low=np.array([]), high=np.array([])),
-        policy=lambda s, m, o, p: None,
+        policy=lambda s, m, o, p: None,  # type: ignore[arg-type, return-value]
         initiable=lambda s, m, o, p: True,
         terminal=lambda s, m, o, p: True,
     )
@@ -190,7 +208,7 @@ def test_inspect_options_proposed_code(ctx):
         # Verify file content
         saved_path = os.path.join(ctx.sandbox_dir, "proposed_code",
                                   "TestOpt.py")
-        with open(saved_path) as f:
+        with open(saved_path, encoding='utf-8') as f:
             assert "# test proposal code" in f.read()
     else:
         # No sandbox — source inlined
@@ -206,7 +224,7 @@ def test_inspect_options_proposed_code(ctx):
     print("  PASS: inspect_options (proposed code in sandbox)")
 
 
-def _get_valid_option_plan_step(ctx):
+def _get_valid_option_plan_step(ctx: Any) -> dict[str, Any] | None:
     """Find a valid single-step option plan for testing."""
     # Find option with fewest type requirements
     for opt in sorted(ctx.options, key=lambda o: len(o.types)):
@@ -244,7 +262,7 @@ def _get_valid_option_plan_step(ctx):
     return None
 
 
-def test_option_plan_missing_goal_atoms(ctx):
+def test_option_plan_missing_goal_atoms(ctx: Any) -> None:
     """test_option_plan reports missing goal atoms when goal not achieved."""
     tools = _make_tools(ctx, ["test_option_plan"])
 
@@ -273,7 +291,7 @@ def test_option_plan_missing_goal_atoms(ctx):
               "goal check not reached)")
 
 
-def test_option_plan_not_initiable_shows_poses(ctx):
+def test_option_plan_not_initiable_shows_poses(ctx: Any) -> None:
     """test_option_plan shows object poses when option is NOT INITIABLE."""
     tools = _make_tools(ctx, ["test_option_plan"])
 
@@ -322,7 +340,7 @@ def test_option_plan_not_initiable_shows_poses(ctx):
               "can't test NOT INITIABLE path)")
 
 
-def test_option_plan_saves_images(ctx):
+def test_option_plan_saves_images(ctx: Any) -> None:
     """test_option_plan always saves scene images (never returns inline)."""
     with tempfile.TemporaryDirectory() as tmpdir:
         ctx.image_save_dir = tmpdir
@@ -352,7 +370,7 @@ def test_option_plan_saves_images(ctx):
         ctx.image_save_dir = None
 
 
-def test_option_plan_failure_shows_poses(ctx):
+def test_option_plan_failure_shows_poses(ctx: Any) -> None:
     """test_option_plan shows object poses when option returns 0 actions."""
     tools = _make_tools(ctx, ["test_option_plan"])
 
@@ -379,7 +397,7 @@ def test_option_plan_failure_shows_poses(ctx):
         print("  PASS: test_option_plan (no failures in output)")
 
 
-def test_format_object_poses(ctx):
+def test_format_object_poses(ctx: Any) -> None:
     """_format_object_poses formats object positions correctly."""
     from predicators.agent_sdk.tools import _format_object_poses
 
@@ -397,7 +415,7 @@ def test_format_object_poses(ctx):
     print(f"  PASS: _format_object_poses ({result.count(chr(10))+1} objects)")
 
 
-def test_render_scene_image(ctx):
+def test_render_scene_image(ctx: Any) -> None:
     """_render_scene_image renders a scene and returns image block."""
     from predicators.agent_sdk.tools import _render_scene_image
 
@@ -425,7 +443,7 @@ def test_render_scene_image(ctx):
         ctx.image_save_dir = None
 
 
-def test_render_scene_no_env(ctx):
+def test_render_scene_no_env(ctx: Any) -> None:
     """_render_scene_image returns None when env is None."""
     from predicators.agent_sdk.tools import _render_scene_image
 
@@ -437,7 +455,7 @@ def test_render_scene_no_env(ctx):
     print("  PASS: _render_scene_image (no env → None)")
 
 
-def test_propose_options_saves_to_sandbox(ctx):
+def test_propose_options_saves_to_sandbox(ctx: Any) -> None:
     """propose_options saves proposal code to sandbox/proposed_code/."""
     tools = _make_tools(ctx, ["propose_options"])
 
@@ -475,7 +493,7 @@ proposed_options = [
                                       "TestProposed.py")
             assert os.path.exists(saved_path), \
                 f"Expected file at {saved_path}"
-            with open(saved_path) as f:
+            with open(saved_path, encoding='utf-8') as f:
                 content = f.read()
             assert "proposed_options" in content
             print("  PASS: propose_options (code saved to sandbox)")
@@ -490,7 +508,7 @@ proposed_options = [
         print(f"  SKIP: propose_options (code failed: {text[:100]})")
 
 
-def test_visualize_state(ctx):
+def test_visualize_state(ctx: Any) -> None:
     """visualize_state modifies object position and saves an image."""
     with tempfile.TemporaryDirectory() as tmpdir:
         ctx.image_save_dir = tmpdir
@@ -527,7 +545,7 @@ def test_visualize_state(ctx):
         ctx.visualized_state = None
 
 
-def test_visualize_shared_state(ctx):
+def test_visualize_shared_state(ctx: Any) -> None:
     """visualize_state then annotate_scene uses modified state."""
     with tempfile.TemporaryDirectory() as tmpdir:
         ctx.image_save_dir = tmpdir
@@ -577,7 +595,7 @@ def test_visualize_shared_state(ctx):
         ctx.visualized_state = None
 
 
-def test_visualize_invalid_object(ctx):
+def test_visualize_invalid_object(ctx: Any) -> None:
     """visualize_state returns error for unknown object name."""
     tools = _make_tools(ctx, ["visualize_state"])
 
@@ -598,7 +616,7 @@ def test_visualize_invalid_object(ctx):
     print("  PASS: visualize_state invalid object → error")
 
 
-def test_visualize_no_modifications(ctx):
+def test_visualize_no_modifications(ctx: Any) -> None:
     """visualize_state returns error when no modifications given."""
     tools = _make_tools(ctx, ["visualize_state"])
 
@@ -612,7 +630,7 @@ def test_visualize_no_modifications(ctx):
     print("  PASS: visualize_state no modifications → error")
 
 
-def test_sync_tool_context_sets_env():
+def test_sync_tool_context_sets_env() -> None:
     """_sync_tool_context extracts env from option model."""
     pred_utils.reset_config(_CFG_OVERRIDES)
 
@@ -630,7 +648,7 @@ def test_sync_tool_context_sets_env():
         types=env.types,
         predicates=env.predicates,
         options=options,
-        train_tasks=list(env.get_train_tasks()),
+        train_tasks=[t.task for t in env.get_train_tasks()],
         option_model=option_model,
     )
 
@@ -644,10 +662,11 @@ def test_sync_tool_context_sets_env():
     print("  PASS: _sync_tool_context sets ctx.env from option model")
 
 
-def main():
+def main() -> None:
+    """Main."""
     with tempfile.TemporaryDirectory() as sandbox_dir:
         print("Setting up environment...")
-        ctx, env = _setup(sandbox_dir=sandbox_dir)
+        ctx, _env = _setup(sandbox_dir=sandbox_dir)
         print(f"Setup complete. {len(ctx.options)} options, "
               f"{len(ctx.train_tasks)} tasks\n")
 

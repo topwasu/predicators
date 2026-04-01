@@ -167,11 +167,13 @@ class LargeLanguageModel(PretrainedLargeModel):
 class OpenAIModel():
     """Common interface with methods for all OpenAI-based models."""
 
+    _openai_key: Optional[str] = None
+
     def set_openai_key(self, key: Optional[str] = None) -> None:
         """Set the OpenAI API key."""
         if key is None:
-            assert "OPENAI_API_KEY" in os.environ
-            key = os.environ["OPENAI_API_KEY"]
+            key = os.environ.get("OPENAI_API_KEY")
+        self._openai_key = key
 
     @retry(wait=wait_random_exponential(min=1, max=60),
            stop=stop_after_attempt(10))
@@ -405,6 +407,7 @@ class OpenRouterModel:
     """Common interface for anything that calls the OpenRouter gateway."""
 
     _ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
+    _key: Optional[str] = None
 
     def set_openrouter_key(self, key: Optional[str] = None) -> None:
         """Read the API key from env unless one is passed explicitly."""

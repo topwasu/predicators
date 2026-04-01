@@ -1,5 +1,4 @@
 """Generic controllers for the robots."""
-import logging
 from typing import Callable, Dict, Optional, Sequence, Set, Tuple, cast
 
 import numpy as np
@@ -105,8 +104,8 @@ def get_move_end_effector_to_pose_action(
             max_vel_norm=max_vel_norm,
             finger_action_nudge_magnitude=finger_action_nudge_magnitude,
             max_base_vel_norm=max_base_vel_norm,
-            max_base_rot_vel=max_base_rot_vel,
-            arm_reach_radius=arm_reach_radius,
+            _max_base_rot_vel=max_base_rot_vel,
+            _arm_reach_radius=arm_reach_radius,
             validate=validate,
         )
 
@@ -145,8 +144,8 @@ def get_move_end_effector_to_pose_with_base_action(
     max_vel_norm: float,
     finger_action_nudge_magnitude: float,
     max_base_vel_norm: float,
-    max_base_rot_vel: float,
-    arm_reach_radius: float,
+    _max_base_rot_vel: float,
+    _arm_reach_radius: float,
     validate: bool = True,
 ) -> Action:
     """Get a combined arm + base action for a mobile-base robot."""
@@ -318,8 +317,11 @@ def create_change_fingers_option(
         current_val, target_val = get_current_and_target_val(
             state, objects, params)
         squared_dist = (target_val - current_val)**2
-        # logging.debug(f"[terminal] current_val: {current_val}, target_val: {target_val}, "
-        #               f"squared_dist: {squared_dist}, grasp_tol: {grasp_tol}")
+        # logging.debug(
+        #     f"[terminal] current_val: {current_val}, "
+        #     f"target_val: {target_val}, "
+        #     f"squared_dist: {squared_dist}, "
+        #     f"grasp_tol: {grasp_tol}")
         return squared_dist < grasp_tol
 
     return ParameterizedOption(

@@ -22,17 +22,18 @@ from predicators.envs.pybullet_domino.components.ramp_component import \
     RampComponent
 from predicators.envs.pybullet_domino.components.stairs_component import \
     StairsComponent
+# pylint: disable-next=line-too-long
 from predicators.envs.pybullet_domino.task_generators.domino_task_generator import \
     DominoTaskGenerator
 from predicators.envs.pybullet_env import PyBulletEnv
 from predicators.pybullet_helpers.camera import create_gui_connection
 from predicators.pybullet_helpers.geometry import Pose, Pose3D, Quaternion
-from predicators.pybullet_helpers.objects import create_object, update_object
+from predicators.pybullet_helpers.objects import create_object
 from predicators.pybullet_helpers.robots import SingleArmPyBulletRobot, \
     create_single_arm_pybullet_robot
 from predicators.settings import CFG
-from predicators.structs import Action, EnvironmentTask, GroundAtom, Object, \
-    Predicate, State, Type
+from predicators.structs import Action, EnvironmentTask, Object, Predicate, \
+    State, Type
 
 
 class PyBulletDominoComposedEnv(PyBulletEnv):
@@ -101,7 +102,7 @@ class PyBulletDominoComposedEnv(PyBulletEnv):
 
     def __init__(self,
                  components: List[DominoEnvComponent],
-                 use_gui: bool = True) -> None:
+                 use_gui: bool = False) -> None:
         """Initialize the composed domino environment.
 
         Args:
@@ -278,7 +279,6 @@ class PyBulletDominoComposedEnv(PyBulletEnv):
 
     def _create_task_specific_objects(self, state: State) -> None:
         """Create any task-specific objects (not used in current impl)."""
-        pass
 
     def _extract_feature(self, obj: Object, feature: str) -> float:
         """Extract state feature for an object."""
@@ -322,7 +322,7 @@ class PyBulletDominoComposedEnv(PyBulletEnv):
     # =========================================================================
 
     def _HandEmpty_holds(self, state: State,
-                         objects: Sequence[Object]) -> bool:
+                         _objects: Sequence[Object]) -> bool:
         """Check if robot hand is empty."""
         if self._domino_component is None:
             return True
@@ -416,7 +416,7 @@ class PyBulletDominoComposedEnv(PyBulletEnv):
 class PyBulletDominoEnvNew(PyBulletDominoComposedEnv):
     """Backward-compatible domino environment class."""
 
-    def __init__(self, use_gui: bool = True) -> None:
+    def __init__(self, use_gui: bool = False) -> None:
         workspace_bounds = {
             "x_lb": self.x_lb,
             "x_ub": self.x_ub,
@@ -448,7 +448,7 @@ class PyBulletDominoEnvNew(PyBulletDominoComposedEnv):
 class PyBulletDominoFanEnvNew(PyBulletDominoComposedEnv):
     """Backward-compatible domino + fan + ball environment class."""
 
-    def __init__(self, use_gui: bool = True) -> None:
+    def __init__(self, use_gui: bool = False) -> None:
         workspace_bounds = {
             "x_lb": self.x_lb,
             "x_ub": self.x_ub,
@@ -504,7 +504,7 @@ class PyBulletDominoFanEnvNew(PyBulletDominoComposedEnv):
 class PyBulletDominoFanRampEnv(PyBulletDominoComposedEnv):
     """Domino + fan + ball + ramp environment class."""
 
-    def __init__(self, use_gui: bool = True) -> None:
+    def __init__(self, use_gui: bool = False) -> None:
         workspace_bounds = {
             "x_lb": self.x_lb,
             "x_ub": self.x_ub,
@@ -565,7 +565,7 @@ class PyBulletDominoFanRampEnv(PyBulletDominoComposedEnv):
 class PyBulletDominoFanRampStairsEnv(PyBulletDominoComposedEnv):
     """Domino + fan + ball + ramp + stairs environment class."""
 
-    def __init__(self, use_gui: bool = True) -> None:
+    def __init__(self, use_gui: bool = False) -> None:
         workspace_bounds = {
             "x_lb": self.x_lb,
             "x_ub": self.x_ub,
@@ -638,8 +638,10 @@ if __name__ == "__main__":
     import time
 
     # Choose which environment to test
-    # Options: "domino", "domino_fan", "domino_fan_ramp", "domino_fan_ramp_stairs"
-    test_env = "domino_fan_ramp_stairs"  # Change this to test different environments
+    # Options: "domino", "domino_fan", "domino_fan_ramp",
+    # "domino_fan_ramp_stairs"
+    # Change this to test different environments
+    test_env = "domino_fan_ramp_stairs"
     if len(sys.argv) > 1:
         test_env = sys.argv[1]
 
@@ -684,32 +686,33 @@ if __name__ == "__main__":
 
     # Generate test tasks
     print("Generating test tasks...")
-    tasks = env._generate_test_tasks()
+    test_tasks = env._generate_test_tasks()  # pylint: disable=protected-access
 
-    print(f"\nGenerated {len(tasks)} tasks")
+    print(f"\nGenerated {len(test_tasks)} tasks")
     print(f"Types: {[t.name for t in env.types]}")
     print(f"Predicates: {[p.name for p in env.predicates]}")
 
     # Test each task
-    for i, task in enumerate(tasks):
+    for i, task in enumerate(test_tasks):
         print(f"\n{'=' * 60}")
         print(f"Task {i + 1}")
         print(f"{'=' * 60}")
 
         # Reset to initial state
-        env._reset_state(task.init)
+        env._reset_state(task.init)  # pylint: disable=protected-access
 
-        print(f"\nGoal atoms:")
+        print("\nGoal atoms:")
         for atom in task.goal:
             print(f"  {atom}")
 
         try:
             for step in range(100000):
-                action = Action(
+                # pylint: disable=protected-access
+                cur_action = Action(
                     np.array(env._pybullet_robot.initial_joint_positions))
-                state = env.step(action)
+                cur_state = env.step(cur_action)
 
-                if all(atom.holds(state) for atom in task.goal):
+                if all(atom.holds(cur_state) for atom in task.goal):
                     print(f"Goal reached at step {step}!")
                     time.sleep(2)
                     break

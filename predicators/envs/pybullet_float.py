@@ -7,7 +7,6 @@ python predicators/main.py --approach oracle --env pybullet_float \
 --sesame_check_expected_atoms False
 """
 
-import logging
 from typing import Any, ClassVar, Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
@@ -121,7 +120,7 @@ class PyBulletFloatEnv(PyBulletEnv):
     _block_type = Type("block", ["x", "y", "z", "in_water", "is_held"],
                        sim_features=["id", "is_light"])
 
-    def __init__(self, use_gui: bool = True) -> None:
+    def __init__(self, use_gui: bool = False) -> None:
         self._robot = Object("robot", self._robot_type)
         self._vessel = Object("vessel", self._vessel_type)
         self._block0 = Object("block0", self._block_type)
@@ -216,13 +215,13 @@ class PyBulletFloatEnv(PyBulletEnv):
     def _store_pybullet_bodies(self, pybullet_bodies: Dict[str, Any]) -> None:
         self._vessel.id = pybullet_bodies["vessel_id"]
         num_blocks = len(pybullet_bodies["block_ids"])
-        for i, (blk, id) in enumerate(
+        for i, (blk, blk_id) in enumerate(
                 zip(self._blocks, pybullet_bodies["block_ids"])):
             if i == num_blocks - 1:
                 blk.is_light = 1.0
             else:
                 blk.is_light = 0.0
-            blk.id = id
+            blk.id = blk_id
 
     # -------------------------------------------------------------------------
     # State Management
@@ -242,7 +241,8 @@ class PyBulletFloatEnv(PyBulletEnv):
                 (bx, by, bz), _ = p.getBasePositionAndOrientation(
                     obj.id, physicsClientId=self._physics_client_id)
                 in_water_val = 0.0
-                # If block is within bounding region and top is below water surface
+                # If block is within bounding region and top is below water
+                # surface
                 if self._is_in_left_compartment(bx, by):
                     if bz < self._current_water_height:
                         in_water_val = 1.0
@@ -293,7 +293,10 @@ class PyBulletFloatEnv(PyBulletEnv):
                           color=[0.5, 0.5, 1, 0.5],
                           physics_client_id=self._physics_client_id)
 
-    def step(self, action: Action, render_obs: bool = False) -> State:
+    def step(  # pylint: disable=redefined-outer-name
+            self,
+            action: Action,
+            render_obs: bool = False) -> State:
         next_state = super().step(action, render_obs=render_obs)
         # Check if blocks entering/exiting water changed its level
         changed = self._update_water_level_if_needed(next_state)
@@ -309,7 +312,7 @@ class PyBulletFloatEnv(PyBulletEnv):
     def _float_light_blocks(self, state: State) -> None:
         """Force each light, unheld block in a container compartment to float
         at the surface."""
-        (vx, vy, vz), _ = p.getBasePositionAndOrientation(
+        (_vx, _vy, vz), _ = p.getBasePositionAndOrientation(
             self._vessel.id, physicsClientId=self._physics_client_id)
         water_surface_z = vz + self._current_water_height
 
@@ -321,7 +324,7 @@ class PyBulletFloatEnv(PyBulletEnv):
                 continue
 
             # Get latest position from PyBullet
-            (bx, by, bz), orn = p.getBasePositionAndOrientation(
+            (bx, by, _bz), orn = p.getBasePositionAndOrientation(
                 blk.id, physicsClientId=self._physics_client_id)
             # Check if the block is inside either compartment
             if (self._is_in_left_compartment(bx, by)
@@ -360,7 +363,7 @@ class PyBulletFloatEnv(PyBulletEnv):
         # Track which blocks are displacing at end
         blocks_displacing_now = {}
 
-        (vx, vy, vz), _ = p.getBasePositionAndOrientation(
+        (_vx, _vy, vz), _ = p.getBasePositionAndOrientation(
             self._vessel.id, physicsClientId=self._physics_client_id)
 
         for blk in self._blocks:
@@ -382,7 +385,7 @@ class PyBulletFloatEnv(PyBulletEnv):
             # Water surface world Z
             surface_z = vz + self._current_water_height
 
-            was_displacing = self._block_is_displacing[blk]
+            _ = self._block_is_displacing[blk]
 
             # Condition for "entering water" => block top is below water surface
             # (i.e. the entire block is now submerged)
@@ -405,10 +408,12 @@ class PyBulletFloatEnv(PyBulletEnv):
                 new_displaced_volume += (self.block_size**3)
 
         # If the new_displaced_volume is the same as the old displaced volume
-        # we had, the water height won't change. But we don't store old displaced
+        # we had, the water height won't change. But we
+        # don't store old displaced
         # volume separately; we store old_height. We can compute old displaced
         # from ( old_volume - 2*area*lowest_level_of_water ).
-        # Easiest approach: just see how many blocks were displacing before vs. now.
+        # Easiest approach: just see how many blocks were displacing before vs.
+        # now.
 
         old_num_displacing = sum(self._block_is_displacing.values())
         new_num_displacing = sum(blocks_displacing_now.values())
@@ -611,10 +616,10 @@ if __name__ == "__main__":
     CFG.seed = 0
     CFG.pybullet_sim_steps_per_action = 1
     env = PyBulletFloatEnv(use_gui=True)
-    task = env._make_tasks(1, np.random.default_rng(0))[0]
-    env._reset_state(task.init)
+    task = env._make_tasks(1, np.random.default_rng(0))[0]  # pylint: disable=protected-access
+    env._reset_state(task.init)  # pylint: disable=protected-access
 
     while True:
-        action = Action(np.array(env._pybullet_robot.initial_joint_positions))
+        action = Action(np.array(env._pybullet_robot.initial_joint_positions))  # pylint: disable=protected-access
         env.step(action)
         time.sleep(0.01)

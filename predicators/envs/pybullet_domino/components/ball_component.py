@@ -194,7 +194,7 @@ class BallComponent(DominoEnvComponent):
                     obj.id, physicsClientId=self._physics_client_id)
                 return pos[{"x": 0, "y": 1, "z": 2}[feature]]
 
-        elif obj.type == self._ball_target_type:
+        if obj.type == self._ball_target_type:
             if feature == "is_hit":
                 # Need current state to check ball position
                 if self._current_state is not None:
@@ -203,9 +203,9 @@ class BallComponent(DominoEnvComponent):
                     tx = self._current_state.get(self._ball_target, "x")
                     ty = self._current_state.get(self._ball_target, "y")
                     dist = np.sqrt((bx - tx)**2 + (by - ty)**2)
-                    return 1.0 if dist < self.position_tolerance else 0.0
+                    return (1.0 if dist < self.position_tolerance else 0.0)
                 return 0.0
-            elif feature in ["x", "y", "z"]:
+            if feature in ["x", "y", "z"]:
                 pos, _ = p.getBasePositionAndOrientation(
                     obj.id, physicsClientId=self._physics_client_id)
                 return pos[{"x": 0, "y": 1, "z": 2}[feature]]
@@ -290,22 +290,27 @@ class BallComponent(DominoEnvComponent):
 
     @property
     def ball(self) -> Object:
+        """Ball."""
         return self._ball
 
     @property
     def ball_target(self) -> Object:
+        """Ball target."""
         return self._ball_target
 
     @property
     def ball_type(self) -> Type:
+        """Ball type."""
         return self._ball_type
 
     @property
     def ball_target_type(self) -> Type:
+        """Ball target type."""
         return self._ball_target_type
 
     @property
     def BallAtTarget(self) -> Predicate:
+        """BallAtTarget."""
         return self._BallAtTarget
 
     @property

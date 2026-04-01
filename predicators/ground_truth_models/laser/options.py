@@ -1,6 +1,5 @@
 """Ground-truth options for the coffee environment."""
 
-import logging
 from functools import lru_cache
 from typing import Callable, ClassVar, Dict, List, Sequence, Set, Tuple
 from typing import Type as TypingType
@@ -13,15 +12,13 @@ from predicators import utils
 from predicators.envs.pybullet_env import PyBulletEnv
 from predicators.envs.pybullet_laser import PyBulletLaserEnv
 from predicators.ground_truth_models import GroundTruthOptionFactory
-from predicators.ground_truth_models.coffee.options import \
-    PyBulletCoffeeGroundTruthOptionFactory
 from predicators.pybullet_helpers.controllers import \
     create_change_fingers_option, create_move_end_effector_to_pose_option
 from predicators.pybullet_helpers.geometry import Pose
 from predicators.pybullet_helpers.robots import SingleArmPyBulletRobot
 from predicators.settings import CFG
-from predicators.structs import Action, Array, Object, ParameterizedOption, \
-    ParameterizedPolicy, Predicate, State, Type
+from predicators.structs import Array, Object, ParameterizedOption, \
+    Predicate, State, Type
 
 
 @lru_cache
@@ -58,12 +55,12 @@ class PyBulletLaserGroundTruthOptionFactory(GroundTruthOptionFactory):
         # Types
         robot_type = types["robot"]
         mirror_type = types["mirror"]
-        target_type = types["target"]
+        _ = types["target"]
         station_type = types["station"]
 
         def get_current_fingers(state: State) -> float:
             robot, = state.get_objects(robot_type)
-            return PyBulletLaserEnv._fingers_state_to_joint(
+            return PyBulletLaserEnv._fingers_state_to_joint(  # pylint: disable=protected-access
                 pybullet_robot, state.get(robot, "fingers"))
 
         def open_fingers_func(state: State, objects: Sequence[Object],
@@ -274,7 +271,7 @@ class PyBulletLaserGroundTruthOptionFactory(GroundTruthOptionFactory):
                  state.get(robot, "wrist")])
             current_pose = Pose(current_position, ee_orn)
 
-            # TODO: this is just for demo
+            # Note: this is just for demo
             target_pos = (cls.env_cls.robot_init_x,
                           cls.env_cls.y_lb + 4 * cls.env_cls.piece_width,
                           z_func(cls.env_cls.piece_height))

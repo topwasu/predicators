@@ -1,11 +1,9 @@
 """Ground-truth options for the coffee environment."""
 
-import logging
 from functools import lru_cache
 from typing import Callable, ClassVar, Dict, List, Sequence, Set, Tuple
 from typing import Type as TypingType
 
-import numpy as np
 import pybullet as p
 from gym.spaces import Box
 
@@ -18,8 +16,8 @@ from predicators.pybullet_helpers.controllers import \
 from predicators.pybullet_helpers.geometry import Pose
 from predicators.pybullet_helpers.robots import SingleArmPyBulletRobot
 from predicators.settings import CFG
-from predicators.structs import Action, Array, Object, ParameterizedOption, \
-    ParameterizedPolicy, Predicate, State, Type
+from predicators.structs import Array, Object, ParameterizedOption, \
+    Predicate, State, Type
 
 
 @lru_cache
@@ -60,7 +58,7 @@ class PyBulletFloatGroundTruthOptionFactory(GroundTruthOptionFactory):
 
         def get_current_fingers(state: State) -> float:
             robot, = state.get_objects(robot_type)
-            return PyBulletFloatEnv._fingers_state_to_joint(
+            return PyBulletFloatEnv._fingers_state_to_joint(  # pylint: disable=protected-access
                 pybullet_robot, state.get(robot, "fingers"))
 
         def open_fingers_func(state: State, objects: Sequence[Object],

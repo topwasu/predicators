@@ -1,7 +1,8 @@
 """A PyBullet environment with two switches and one light bulb.
 
 The power switch controls whether the light is on/off.
-The color switch cycles through colors (red, green, blue) each time it's toggled.
+The color switch cycles through colors (red, green, blue)
+each time it's toggled.
 The goal is to have the light display a specific target color.
 
 python predicators/main.py --approach oracle --env pybullet_switch \
@@ -88,7 +89,7 @@ class PyBulletSwitchEnv(PyBulletEnv):
         sim_features=["id", "joint_id", "joint_scale", "color_count"])
     _light_type = Type("light", ["x", "y", "z", "rot", "is_on", "color_index"])
 
-    def __init__(self, use_gui: bool = True) -> None:
+    def __init__(self, use_gui: bool = False) -> None:
         # Objects
         self._robot = Object("robot", self._robot_type)
         self._power_switch = Object("power_switch", self._power_switch_type)
@@ -456,17 +457,18 @@ class PyBulletSwitchEnv(PyBulletEnv):
 
 
 if __name__ == "__main__":
-    """Run a simple simulation to test the environment."""
+    # Run a simple simulation to test the environment.
     import time
 
     CFG.seed = 0
     CFG.env = "pybullet_switch"
     CFG.num_train_tasks = 1
     env = PyBulletSwitchEnv(use_gui=True)
-    task = env._generate_train_tasks()[0]
-    env._reset_state(task.init)
+    task = env._generate_train_tasks()[0]  # pylint: disable=protected-access
+    env._reset_state(task.init)  # pylint: disable=protected-access
 
     while True:
-        action = Action(np.array(env._pybullet_robot.initial_joint_positions))
-        env.step(action)
+        _joints = env._pybullet_robot.initial_joint_positions  # pylint: disable=protected-access
+        _act = Action(np.array(_joints))
+        env.step(_act)
         time.sleep(0.01)

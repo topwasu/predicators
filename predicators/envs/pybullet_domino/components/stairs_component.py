@@ -1,7 +1,7 @@
 """Stairs component for the domino environment.
 
 This component handles:
-- Creating stairs (platforms) under dominoes with progressively increasing height
+- Creating stairs (platforms) under dominoes with increasing height
 - Dynamic stair creation based on domino positions
 """
 
@@ -92,13 +92,12 @@ class StairsComponent(DominoEnvComponent):
         return []  # Stairs are dynamically created, not pre-defined objects
 
     def initialize_pybullet(self, physics_client_id: int) -> Dict[str, Any]:
-        """Initialize PyBullet - stairs are created dynamically in reset_state."""
+        """Initialize PyBullet - stairs created in reset_state."""
         self._physics_client_id = physics_client_id
         return {}  # No pre-created bodies
 
     def store_pybullet_bodies(self, pybullet_bodies: Dict[str, Any]) -> None:
         """No bodies to store - stairs are created dynamically."""
-        pass
 
     def set_domino_type(self, domino_type: Type) -> None:
         """Set the domino type reference for positioning stairs."""
@@ -155,9 +154,9 @@ class StairsComponent(DominoEnvComponent):
 
     def get_init_dict_entries(
         self,
-        rng: "np.random.Generator",
+        rng: np.random.Generator,
     ) -> Dict[Object, Dict[str, Any]]:
-        """Stairs don't add entries to init dict - they're created dynamically."""
+        """Stairs don't add init dict entries - created dynamically."""
         return {}
 
     # -------------------------------------------------------------------------

@@ -35,7 +35,7 @@ Example::
     )
 """
 
-from typing import Sequence, Tuple
+from typing import List, Sequence, Tuple
 
 import numpy as np
 import pybullet as p
@@ -48,7 +48,7 @@ from predicators.pybullet_helpers.geometry import Pose
 from predicators.structs import Array, Object, ParameterizedOption, State, Type
 
 # Canonical continuous parameters for Pour (none remaining).
-_POUR_PARAMS = []
+_POUR_PARAMS: List[Tuple[str, float, float]] = []
 
 # Fixed pour tilt angle (radians).
 _POUR_TILT = np.pi / 4
@@ -97,8 +97,9 @@ def create_pour_skill(
     ) -> Tuple[float, float, float, float]:
         """Compute robot EE target from cup position + offsets + jug
         displacement."""
+        del params
         # Cup position from callback
-        cx, cy, cz, yaw = get_target_pose_fn(state, objects, _empty, cfg)
+        cx, cy, _, yaw = get_target_pose_fn(state, objects, _empty, cfg)
         # Pour target for jug (all offsets are fixed constants)
         pour_x, pour_y = cx, cy + _POUR_Y_OFF
         # Jug base z = robot EE z minus handle-to-base distance

@@ -8,7 +8,7 @@ This component handles:
 - Related predicates (FanOn, FanOff, Controls, FanFacingSide)
 """
 
-from typing import Any, ClassVar, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, ClassVar, Dict, List, Optional, Sequence, Set
 
 import numpy as np
 import pybullet as p
@@ -96,10 +96,14 @@ class FanComponent(DominoEnvComponent):
         self.down_fan_y = self.y_lb + self.fan_x_len / 2 + 0.1
 
         # Fan placement boundaries
-        self.fan_y_lb = self.down_fan_y + self.fan_x_len / 2 + self.fan_y_len / 2 + 0.01
-        self.fan_y_ub = self.up_fan_y - self.fan_x_len / 2 - self.fan_y_len / 2 - 0.01
-        self.fan_x_lb = self.left_fan_x + self.fan_x_len / 2 + self.fan_y_len / 2 + 0.01
-        self.fan_x_ub = self.right_fan_x - self.fan_x_len / 2 - self.fan_y_len / 2 - 0.01
+        self.fan_y_lb = (self.down_fan_y + self.fan_x_len / 2 +
+                         self.fan_y_len / 2 + 0.01)
+        self.fan_y_ub = (self.up_fan_y - self.fan_x_len / 2 -
+                         self.fan_y_len / 2 - 0.01)
+        self.fan_x_lb = (self.left_fan_x + self.fan_x_len / 2 +
+                         self.fan_y_len / 2 + 0.01)
+        self.fan_x_ub = (self.right_fan_x - self.fan_x_len / 2 -
+                         self.fan_y_len / 2 - 0.01)
 
         # Switch positioning
         self.switch_y = (self.y_lb + self.y_ub) * 0.5 - 0.25
@@ -274,15 +278,15 @@ class FanComponent(DominoEnvComponent):
         if obj.type == self._fan_type:
             if feature == "facing_side":
                 return float(obj.side_idx)
-            elif feature == "is_on":
+            if feature == "is_on":
                 controlling_switch = self._switches[obj.side_idx]
                 return float(self._is_switch_on(controlling_switch.id))
-        elif obj.type == self._switch_type:
+        if obj.type == self._switch_type:
             if feature == "controls_fan":
                 return float(obj.side_idx)
-            elif feature == "is_on":
+            if feature == "is_on":
                 return float(self._is_switch_on(obj.id))
-        elif obj.type == self._side_type:
+        if obj.type == self._side_type:
             if feature == "side_idx":
                 return float(obj.side_idx)
         return None
@@ -541,24 +545,30 @@ class FanComponent(DominoEnvComponent):
 
     @property
     def fans(self) -> List[Object]:
+        """Fans."""
         return self._fans
 
     @property
     def switches(self) -> List[Object]:
+        """Switches."""
         return self._switches
 
     @property
     def sides(self) -> List[Object]:
+        """Sides."""
         return self._sides
 
     @property
     def fan_type(self) -> Type:
+        """Fan type."""
         return self._fan_type
 
     @property
     def switch_type(self) -> Type:
+        """Switch type."""
         return self._switch_type
 
     @property
     def side_type(self) -> Type:
+        """Side type."""
         return self._side_type

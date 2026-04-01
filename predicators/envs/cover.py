@@ -33,7 +33,7 @@ class CoverEnv(BaseEnv):
     _target_type = Type("target", ["is_block", "is_target", "width", "pose"])
     _robot_type = Type("robot", ["hand", "pose_x", "pose_z"])
 
-    def __init__(self, use_gui: bool = True) -> None:
+    def __init__(self, use_gui: bool = False) -> None:
         super().__init__(use_gui)
 
         # Predicates
@@ -374,7 +374,7 @@ class CoverEnvHandEmpty(CoverEnv):
     only their argument's states.
     """
 
-    def __init__(self, use_gui: bool = True) -> None:
+    def __init__(self, use_gui: bool = False) -> None:
         super().__init__(use_gui)
 
         # Add attribute.
@@ -410,7 +410,7 @@ class CoverEnvTypedOptions(CoverEnv):
 class CoverEnvHierarchicalTypes(CoverEnv):
     """Toy cover domain with hierarchical types, just for testing."""
 
-    def __init__(self, use_gui: bool = True) -> None:
+    def __init__(self, use_gui: bool = False) -> None:
         super().__init__(use_gui)
 
         # Change blocks to be of a derived type
@@ -419,6 +419,10 @@ class CoverEnvHierarchicalTypes(CoverEnv):
             "block_derived",
             ["is_block", "is_target", "width", "pose", "grasp"],
             parent=self._parent_block_type)
+        # Recreate blocks with new type.
+        self._blocks = []
+        self._targets = []
+        self._create_blocks_and_targets()
 
     @classmethod
     def get_name(cls) -> str:
@@ -450,7 +454,7 @@ class CoverEnvRegrasp(CoverEnv):
     _allow_free_space_placing: ClassVar[bool] = True
     _initial_pick_offsets: ClassVar[List[float]] = [-0.95, 0.0, 0.95]
 
-    def __init__(self, use_gui: bool = True) -> None:
+    def __init__(self, use_gui: bool = False) -> None:
         super().__init__(use_gui)
 
         # Add a Clear predicate to prevent attempts at placing on already
@@ -515,7 +519,7 @@ class CoverMultistepOptions(CoverEnvTypedOptions):
     grip_ub: ClassVar[float] = 1.0
     snap_tol: ClassVar[float] = 1e-2
 
-    def __init__(self, use_gui: bool = True) -> None:
+    def __init__(self, use_gui: bool = False) -> None:
         super().__init__(use_gui)
 
         # Need to now include y and gripper info in state.
@@ -552,6 +556,10 @@ class CoverMultistepOptions(CoverEnvTypedOptions):
         # Need to override static object creation because the types are now
         # different (in terms of equality).
         self._robot = Object("robby", self._robot_type)
+        # Recreate blocks and targets with new types.
+        self._blocks = []
+        self._targets = []
+        self._create_blocks_and_targets()
 
     @classmethod
     def get_name(cls) -> str:
@@ -1034,7 +1042,7 @@ class BumpyCoverEnv(CoverEnvRegrasp):
     _allow_free_space_placing: ClassVar[bool] = False
     _bumps_regional: ClassVar[bool] = False
 
-    def __init__(self, use_gui: bool = True) -> None:
+    def __init__(self, use_gui: bool = False) -> None:
         super().__init__(use_gui)
 
         # Need to include "bumpy" feature to distinguish bumpy from smooth
@@ -1042,6 +1050,10 @@ class BumpyCoverEnv(CoverEnvRegrasp):
         self._block_type = Type(
             "block",
             ["is_block", "is_target", "width", "pose", "grasp", "bumpy"])
+        # Recreate blocks with new type.
+        self._blocks = []
+        self._targets = []
+        self._create_blocks_and_targets()
 
         # Need to override predicate creation  for blocks because the types are
         # now different (in terms of equality).
@@ -1140,7 +1152,7 @@ class RegionalBumpyCoverEnv(BumpyCoverEnv):
     _allow_free_space_placing: ClassVar[bool] = True
     _bumps_regional: ClassVar[bool] = True
 
-    def __init__(self, use_gui: bool = True) -> None:
+    def __init__(self, use_gui: bool = False) -> None:
         super().__init__(use_gui)
 
         assert not CFG.bumpy_cover_right_targets, \

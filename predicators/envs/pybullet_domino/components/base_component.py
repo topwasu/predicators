@@ -139,10 +139,9 @@ class DominoEnvComponent(ABC):
         Override this method to add per-step physics updates (e.g., wind
         forces from fans). By default, does nothing.
         """
-        pass
 
     def get_init_dict_entries(
-            self, rng: "np.random.Generator") -> Dict[Object, Dict[str, Any]]:
+            self, rng: np.random.Generator) -> Dict[Object, Dict[str, Any]]:
         """Return initial state dictionary entries for task generation.
 
         Override this method to provide default initial state values for
@@ -154,6 +153,7 @@ class DominoEnvComponent(ABC):
         Returns:
             Dictionary mapping objects to their initial feature values.
         """
+        del rng  # unused in base implementation
         return {}
 
     def get_object_ids_for_held_check(self) -> List[int]:

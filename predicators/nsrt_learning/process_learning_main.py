@@ -1,3 +1,4 @@
+"""process_learning_main module."""
 import logging
 from pprint import pformat
 from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple, cast
@@ -12,10 +13,9 @@ from predicators.nsrt_learning.strips_learning import learn_strips_operators
 from predicators.nsrt_learning.strips_learning.clustering_learner import \
     ClusterAndSearchProcessLearner
 from predicators.settings import CFG
-from predicators.structs import PNAD, CausalProcess, DerivedPredicate, \
-    DummyOption, EndogenousProcess, ExogenousProcess, GroundAtom, \
-    GroundAtomTrajectory, LiftedAtom, LowLevelTrajectory, \
-    ParameterizedOption, Predicate, Segment, Task
+from predicators.structs import CausalProcess, DerivedPredicate, DummyOption, \
+    EndogenousProcess, ExogenousProcess, GroundAtomTrajectory, LiftedAtom, \
+    LowLevelTrajectory, ParameterizedOption, Predicate, Segment, Task
 
 
 def learn_processes_from_data(
@@ -67,7 +67,8 @@ def learn_processes_from_data(
                 for i, traj in enumerate(trajectories)
             ]
 
-        # STEP 2: Learn STRIPS operators on the given data segments as for NSRTs.
+        # STEP 2: Learn STRIPS operators on the given data segments as for
+        # NSRTs.
         pnads = learn_strips_operators(
             trajectories,
             train_tasks,
@@ -81,8 +82,9 @@ def learn_processes_from_data(
             annotations=annotations)
 
         # STEP 3: Learn options and update PNADs
-        if CFG.strips_learner != "oracle" or CFG.sampler_learner != "oracle" or \
-        CFG.option_learner != "no_learning":
+        if CFG.strips_learner != "oracle" or \
+                CFG.sampler_learner != "oracle" or \
+                CFG.option_learner != "no_learning":
             assert action_space is not None, \
                 "Action space must be provided for option learning."
             assert known_options is not None, \
@@ -193,7 +195,7 @@ def filter_explained_segment(
         objects = set(traj[0].trajectory.states[0])
         remaining_segments = []
         for segment in traj:
-            # TODO: is this kind of like "cover"?
+            # Note: is this kind of like "cover"?
             if processes_type_str == "endogenous":
                 relevant_procs = [
                     p for p in processes
@@ -225,11 +227,9 @@ def filter_explained_segment(
                 else:
                     option_vars = []
                     ignore_effects = set()
-                var_to_obj = {
-                    v: o
-                    for v, o in zip(option_vars,
-                                    segment.get_option().objects)
-                }
+                var_to_obj = dict(
+                    zip(option_vars,
+                        segment.get_option().objects))
                 for g_proc in utils.all_ground_operators_given_partial(
                         proc, objects, var_to_obj):  # type: ignore[arg-type]
                     _add_atoms = add_atoms.copy()

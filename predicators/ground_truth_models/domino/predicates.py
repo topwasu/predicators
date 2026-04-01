@@ -121,7 +121,8 @@ class PyBulletDominoGroundTruthPredicateFactory(GroundTruthPredicateFactory):
         """
         domino1, domino2, direction_obj = objects
 
-        # Note: No longer need to filter "loc_other_" positions since we use exact coordinates
+        # Note: No longer need to filter "loc_other_" positions since we use
+        # exact coordinates
 
         # Helper functions to parse object names and cache results
         _pos_coord_cache: Dict[Object, tuple] = {}
@@ -186,7 +187,7 @@ class PyBulletDominoGroundTruthPredicateFactory(GroundTruthPredicateFactory):
 
             # Import pos_gap for spatial calculations
             from predicators.envs.pybullet_domino.composed_env import \
-                PyBulletDominoComposedEnv
+                PyBulletDominoComposedEnv  # pylint: disable=import-outside-toplevel
             pos_gap = PyBulletDominoComposedEnv.pos_gap
 
             # Positional Check: Is there ANY valid geometric placement?
@@ -315,7 +316,8 @@ class PyBulletDominoGroundTruthPredicateFactory(GroundTruthPredicateFactory):
                 domino_x = state.get(obj, "x")
                 domino_y = state.get(obj, "y")
 
-                # If domino is close enough to this position, position is not clear
+                # If domino is close enough to this position, position is not
+                # clear
                 if (abs(domino_x - target_x) <= position_tolerance
                         and abs(domino_y - target_y) <= position_tolerance
                         and not state.get(obj, "is_held")):
@@ -328,16 +330,18 @@ class PyBulletDominoGroundTruthPredicateFactory(GroundTruthPredicateFactory):
                           objects: Sequence[Object]) -> bool:
         """Check if a position is adjacent to a domino in cardinal directions.
 
-        This is similar to _InFrontDirection_holds but checks if a position
-        is adjacent to any position where the domino could be placed, considering
-        that the domino can be in multiple positions during heuristic computation.
+        This is similar to _InFrontDirection_holds but checks if
+        a position is adjacent to any position where the domino
+        could be placed, considering that the domino can be in
+        multiple positions during heuristic computation.
 
         Adjacent positions are those that are exactly one grid step away in
         cardinal directions (up, down, left, right) but not diagonal.
         """
         position, domino = objects
 
-        # Note: No longer need to filter "loc_other_" positions since we use exact coordinates
+        # Note: No longer need to filter "loc_other_" positions since we use
+        # exact coordinates
 
         # Helper functions to parse object names and cache results
         _pos_coord_cache: Dict[Object, tuple] = {}
@@ -356,7 +360,7 @@ class PyBulletDominoGroundTruthPredicateFactory(GroundTruthPredicateFactory):
 
         # Import pos_gap for spatial calculations
         from predicators.envs.pybullet_domino.composed_env import \
-            PyBulletDominoComposedEnv
+            PyBulletDominoComposedEnv  # pylint: disable=import-outside-toplevel
         pos_gap = PyBulletDominoComposedEnv.pos_gap
 
         # Get coordinates of the target position
@@ -378,7 +382,7 @@ class PyBulletDominoGroundTruthPredicateFactory(GroundTruthPredicateFactory):
             dy = abs(target_y - domino_y)
 
             # Adjacent in cardinal directions means:
-            # - Approximately pos_gap away in one direction AND close to 0 in the other
+            # - ~pos_gap away in one dir AND close to 0 in other
             # Use 30% tolerance for matching pos_gap
             if ((abs(dx - pos_gap) < pos_gap * 0.3 and dy < pos_gap * 0.3) or
                 (abs(dy - pos_gap) < pos_gap * 0.3 and dx < pos_gap * 0.3)):

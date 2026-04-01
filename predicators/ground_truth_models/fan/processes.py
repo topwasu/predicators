@@ -59,7 +59,6 @@ class PyBulletFanGroundTruthProcessFactory(GroundTruthProcessFactory):
         SideOf = predicates["SideOf"]
         OppositeFan = predicates["OppositeFan"]
         if not CFG.fan_known_controls_relation:
-            Controls = predicates["Controls"]
             SwitchOn = predicates["SwitchOn"]
             SwitchOff = predicates["SwitchOff"]
 
@@ -150,19 +149,16 @@ class PyBulletFanGroundTruthProcessFactory(GroundTruthProcessFactory):
         # --- Exogenous processes: Ball movement due to active fans ---
         fan = Variable("?fan", fan_type)
         op_fan = Variable("?op_fan", fan_type)
-        switch = Variable("?switch", switch_type)
-        if not CFG.fan_known_controls_relation:
-            op_switch = Variable("?op_switch", switch_type)
         ball = Variable("?ball", ball_type)
         pos1 = Variable("?pos1", location_type)
         pos2 = Variable("?pos2", location_type)
-        dir = Variable("?dir", side_type)
-        parameters = [ball, pos1, pos2, dir]
+        direction = Variable("?dir", side_type)
+        parameters = [ball, pos1, pos2, direction]
         condition_at_start = {
             LiftedAtom(BallAtLoc, [ball, pos2]),
             LiftedAtom(ClearLoc, [pos1]),
-            LiftedAtom(SideOf, [pos1, pos2, dir]),  # could be invented
-            LiftedAtom(FanFacingSide, [fan, dir]),  # could be invented
+            LiftedAtom(SideOf, [pos1, pos2, direction]),  # could be invented
+            LiftedAtom(FanFacingSide, [fan, direction]),  # could be invented
         }
         if CFG.fan_known_controls_relation:
             parameters.extend([fan, op_fan])
@@ -172,11 +168,6 @@ class PyBulletFanGroundTruthProcessFactory(GroundTruthProcessFactory):
             condition_at_start.add(LiftedAtom(FanOff, [op_fan]))
         else:
             raise NotImplementedError
-            # if not known, we add it here and let the agent to potentially
-            # learn this
-            condition_at_start.add(LiftedAtom(
-                SwitchOn, [switch]))  # type: ignore[unreachable]
-            condition_at_start.add(LiftedAtom(Controls, [switch, fan]))
 
         condition_overall = set(condition_at_start)
         add_effects = {

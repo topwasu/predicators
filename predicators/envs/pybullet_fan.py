@@ -1,6 +1,5 @@
-import logging
+"""envsbullet_fan module."""
 from collections import deque
-from itertools import product
 from typing import Any, ClassVar, Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
@@ -258,7 +257,7 @@ class PyBulletFanEnv(PyBulletEnv):
     # -------------------------------------------------------------------------
     # Environment initialization
     # -------------------------------------------------------------------------
-    def __init__(self, use_gui: bool = True) -> None:
+    def __init__(self, use_gui: bool = False) -> None:
         self._robot = Object("robot", self._robot_type)
 
         # Fans - create one fan object per side instead of multiple
@@ -289,8 +288,9 @@ class PyBulletFanEnv(PyBulletEnv):
             Object(f"wall{i}", self._wall_type)
             for i in range(max_walls_per_task)
         ]
-        # Create positions based on maximum grid size to support both train and test
-        self.pos_dict: Dict[Object, Dict[str, float]] = dict()
+        # Create positions based on maximum grid size to support both train and
+        # test
+        self.pos_dict: Dict[Object, Dict[str, float]] = {}
 
         # Grid positions will be set dynamically in task generation
 
@@ -365,10 +365,12 @@ class PyBulletFanEnv(PyBulletEnv):
         #                           self._BackFanSwitch_holds)
         # self._LeftFanSwitch = Predicate("LeftFanSwitch", [self._switch_type],
         #                                 self._LeftFanSwitch_holds)
-        # self._RightFanSwitch = Predicate("RightFanSwitch", [self._switch_type],
-        #                                  self._RightFanSwitch_holds)
-        # self._FrontFanSwitch = Predicate("FrontFanSwitch", [self._switch_type],
-        #                                  self._FrontFanSwitch_holds)
+        # self._RightFanSwitch = Predicate(
+        #     "RightFanSwitch", [self._switch_type],
+        #     self._RightFanSwitch_holds)
+        # self._FrontFanSwitch = Predicate(
+        #     "FrontFanSwitch", [self._switch_type],
+        #     self._FrontFanSwitch_holds)
         # self._BackFanSwitch = Predicate("BackFanSwitch", [self._switch_type],
         #                                 self._BackFanSwitch_holds)
 
@@ -582,7 +584,8 @@ class PyBulletFanEnv(PyBulletEnv):
                 self._get_joint_id(fid, "joint_0", self._physics_client_id)
                 for fid in fan_obj.fan_ids
             ]
-            # Assign an arbitrary ID from the fans on this side (use the first one)
+            # Assign an arbitrary ID from the fans on this side (use the first
+            # one)
             fan_obj.id = fan_obj.fan_ids[0] if fan_obj.fan_ids else -1
 
         # Switches
@@ -601,12 +604,14 @@ class PyBulletFanEnv(PyBulletEnv):
         #     # side_obj.id = -1  # No PyBullet body
         #     side_obj.side_idx = i  # 0=left,1=right,2=back,3=front
 
-        for wall, id in zip(self._walls, pybullet_bodies["wall_ids"]):
-            wall.id = id
+        for wall, obj_id in zip(self._walls, pybullet_bodies["wall_ids"]):
+            wall.id = obj_id
         self._ball.id = pybullet_bodies["ball_id"]
         self._target.id = pybullet_bodies["target_id"]
 
-        # Initialize boundary wall IDs list (will be populated in _reset_custom_env_state)
+        # Initialize boundary wall IDs list (will be populated
+        # in _reset_custom_env_state)
+        # pylint: disable=attribute-defined-outside-init
         self._boundary_wall_ids: List[int] = []
 
     # -------------------------------------------------------------------------
@@ -644,6 +649,7 @@ class PyBulletFanEnv(PyBulletEnv):
         for wall_id in self._boundary_wall_ids:
             if wall_id >= 0:
                 p.removeBody(wall_id, physicsClientId=self._physics_client_id)
+        # pylint: disable=attribute-defined-outside-init
         self._boundary_wall_ids = []
 
         # Get all position objects that are in the state
@@ -725,6 +731,7 @@ class PyBulletFanEnv(PyBulletEnv):
             physics_client_id=self._physics_client_id)
 
         # Store the new boundary wall IDs
+        # pylint: disable=attribute-defined-outside-init
         self._boundary_wall_ids = [
             left_wall_id, right_wall_id, front_wall_id, back_wall_id
         ]
@@ -737,29 +744,31 @@ class PyBulletFanEnv(PyBulletEnv):
         if num_pos_x % 2 == 1:
             x_start = cls.loc_x_mid - (num_pos_x - 1) * cls.pos_gap / 2
         else:
-            x_start = cls.loc_x_mid - num_pos_x * cls.pos_gap / 2 + cls.pos_gap / 2
+            x_start = (cls.loc_x_mid - num_pos_x * cls.pos_gap / 2 +
+                       cls.pos_gap / 2)
 
         if num_pos_y % 2 == 1:
-            y_start = cls.loc_y_mid - (num_pos_y - 1) * cls.pos_gap / 2
+            y_start = (cls.loc_y_mid - (num_pos_y - 1) * cls.pos_gap / 2)
         else:
-            y_start = cls.loc_y_mid - num_pos_y * cls.pos_gap / 2 + cls.pos_gap / 2
+            y_start = (cls.loc_y_mid - num_pos_y * cls.pos_gap / 2 +
+                       cls.pos_gap / 2)
 
         x_coords = [x_start + i * cls.pos_gap for i in range(num_pos_x)]
         y_coords = [y_start + i * cls.pos_gap for i in range(num_pos_y)]
 
         # Assertions to ensure coordinates don't go beyond bounds
-        assert min(
-            x_coords
-        ) >= cls.loc_x_lb, f"Minimum x coordinate {min(x_coords)} is below lower bound {cls.loc_x_lb}"
-        assert max(
-            x_coords
-        ) <= cls.loc_x_ub, f"Maximum x coordinate {max(x_coords)} is above upper bound {cls.loc_x_ub}"
-        assert min(
-            y_coords
-        ) >= cls.loc_y_lb, f"Minimum y coordinate {min(y_coords)} is below lower bound {cls.loc_y_lb}"
-        assert max(
-            y_coords
-        ) <= cls.loc_y_ub, f"Maximum y coordinate {max(y_coords)} is above upper bound {cls.loc_y_ub}"
+        assert min(x_coords) >= cls.loc_x_lb, (
+            f"Minimum x coordinate {min(x_coords)} "
+            f"is below lower bound {cls.loc_x_lb}")
+        assert max(x_coords) <= cls.loc_x_ub, (
+            f"Maximum x coordinate {max(x_coords)} "
+            f"is above upper bound {cls.loc_x_ub}")
+        assert min(y_coords) >= cls.loc_y_lb, (
+            f"Minimum y coordinate {min(y_coords)} "
+            f"is below lower bound {cls.loc_y_lb}")
+        assert max(y_coords) <= cls.loc_y_ub, (
+            f"Maximum y coordinate {max(y_coords)} "
+            f"is above upper bound {cls.loc_y_ub}")
 
         return x_coords, y_coords
 
@@ -834,15 +843,15 @@ class PyBulletFanEnv(PyBulletEnv):
         if obj.type == self._fan_type:
             if feature == "facing_side":
                 return float(obj.side_idx)
-            elif feature == "is_on":
+            if feature == "is_on":
                 controlling_switch = self._switches[obj.side_idx]
                 return float(self._is_switch_on(controlling_switch.id))
-        elif obj.type == self._switch_type:
+        if obj.type == self._switch_type:
             if feature == "controls_fan":
                 return float(obj.side_idx)
-            elif feature == "is_on":
+            if feature == "is_on":
                 return float(self._is_switch_on(obj.id))
-        elif obj.type == self._target_type:
+        if obj.type == self._target_type:
             if feature == "is_hit":
                 ball_pos, _ = p.getBasePositionAndOrientation(
                     self._ball.id, physicsClientId=self._physics_client_id)
@@ -850,14 +859,14 @@ class PyBulletFanEnv(PyBulletEnv):
                     self._target.id, physicsClientId=self._physics_client_id)
                 bx, by = ball_pos[0], ball_pos[1]
                 tx, ty = target_pos[0], target_pos[1]
-                return 1.0 if self._is_ball_close_to_position(bx, by, tx, ty) \
-                    else 0.0
-        elif obj.type == self._location_type:
+                return 1.0 if self._is_ball_close_to_position(bx, by, tx,
+                                                              ty) else 0.0
+        if obj.type == self._location_type:
             if feature == "xx":
                 return obj.xx
-            elif feature == "yy":
+            if feature == "yy":
                 return obj.yy
-        elif obj.type == self._side_type:
+        if obj.type == self._side_type:
             if feature == "side_idx":
                 return float(obj.side_idx)
 
@@ -866,7 +875,10 @@ class PyBulletFanEnv(PyBulletEnv):
     # -------------------------------------------------------------------------
     # Step
     # -------------------------------------------------------------------------
-    def step(self, action: Action, render_obs: bool = False) -> State:
+    def step(  # pylint: disable=redefined-outer-name
+            self,
+            action: Action,
+            render_obs: bool = False) -> State:
         """Execute a low-level action, then spin fans & blow the ball."""
         super().step(action, render_obs=render_obs)
         self._simulate_fans()
@@ -906,7 +918,7 @@ class PyBulletFanEnv(PyBulletEnv):
             if not hasattr(fan_obj, 'fan_ids') or not fan_obj.fan_ids:
                 continue
 
-            if on and fan_obj.fan_ids:  # Only apply force if we have fans for this side
+            if on and fan_obj.fan_ids:  # Apply force
                 # Control all physical fans for this side
                 for i, fan_id in enumerate(fan_obj.fan_ids):
                     joint_id = fan_obj.joint_ids[i]
@@ -1178,7 +1190,8 @@ class PyBulletFanEnv(PyBulletEnv):
         side1 = state.get(fan1, "facing_side")
         side2 = state.get(fan2, "facing_side")
         # Check if they are on opposite sides using XOR
-        # Sides 0,1 are opposite (differ by 1), sides 2,3 are opposite (differ by 1)
+        # Sides 0,1 are opposite (differ by 1), sides 2,3 are opposite (differ
+        # by 1)
         return abs(side1 - side2) == 1 and (side1 // 2) == (side2 // 2)
 
     def _SideOf_holds(self, state: State, objects: Sequence[Object]) -> bool:
@@ -1196,26 +1209,25 @@ class PyBulletFanEnv(PyBulletEnv):
             return self._is_ball_close_to_position(
                 state.get(pos1, "xx") + self.pos_gap, state.get(pos1, "yy"),
                 state.get(pos2, "xx"), state.get(pos2, "yy"))
-        elif side_val == 0:  # right
+        if side_val == 0:  # right
             return self._is_ball_close_to_position(
                 state.get(pos1, "xx") - self.pos_gap, state.get(pos1, "yy"),
                 state.get(pos2, "xx"), state.get(pos2, "yy"))
-        elif side_val == 2:  # down
+        if side_val == 2:  # down
             return self._is_ball_close_to_position(
                 state.get(pos1, "xx"),
                 state.get(pos1, "yy") - self.pos_gap, state.get(pos2, "xx"),
                 state.get(pos2, "yy"))
-        elif side_val == 3:  # up
+        if side_val == 3:  # up
             return self._is_ball_close_to_position(
                 state.get(pos1, "xx"),
                 state.get(pos1, "yy") + self.pos_gap, state.get(pos2, "xx"),
                 state.get(pos2, "yy"))
-        else:
-            return False
+        return False
 
     def _Controls_holds(self, state: State, objects: Sequence[Object]) -> bool:
         """(Controls fan switch)."""
-        # TODO: this probably needs to be updated
+        # Note: this probably needs to be updated.
         switch, fan = objects
         return state.get(fan,
                          "facing_side") == state.get(switch, "controls_fan")
@@ -1239,9 +1251,10 @@ class PyBulletFanEnv(PyBulletEnv):
             possible_num_walls_per_task=CFG.fan_test_num_walls_per_task,
             rng=self._test_rng)
 
-    def _make_tasks(self, num_tasks: int, num_pos_x: int, num_pos_y: int,
-                    possible_num_walls_per_task: List[int],
-                    rng: np.random.Generator) -> List[EnvironmentTask]:
+    def _make_tasks(  # pylint: disable=redefined-outer-name
+            self, num_tasks: int, num_pos_x: int, num_pos_y: int,
+            possible_num_walls_per_task: List[int],
+            rng: np.random.Generator) -> List[EnvironmentTask]:
         # Generate grid coordinates for this specific configuration
         x_coords, y_coords = self._generate_grid_coordinates(
             num_pos_x, num_pos_y)
@@ -1271,7 +1284,7 @@ class PyBulletFanEnv(PyBulletEnv):
                                    parentObjectUniqueId=-1,
                                    parentLinkIndex=-1)
 
-        tasks = []
+        tasks = []  # pylint: disable=redefined-outer-name
         for _ in range(num_tasks):
             # Try to generat a valid task with path validation
             max_attempts = 100  # Prevent infinite loop
@@ -1303,7 +1316,8 @@ class PyBulletFanEnv(PyBulletEnv):
                     # Safely remove the ball position
                     available_pos.remove(ball_pos)
 
-                    # Choose target to create alignment (same row or column as ball)
+                    # Choose target to create alignment (same row or column as
+                    # ball)
                     aligned_targets = []
 
                     # Same row targets (horizontal alignment) - 2 steps away
@@ -1342,7 +1356,8 @@ class PyBulletFanEnv(PyBulletEnv):
                     # Strategic wall placement to block direct path
                     wall_positions = []
                     if num_walls_per_task > 0:
-                        # Place wall to block direct path between ball and target
+                        # Place wall to block direct path between ball and
+                        # target
                         blocking_pos = self._get_strategic_wall_position(
                             ball_pos, tar_pos, x_coords, y_coords,
                             available_pos, rng)
@@ -1373,7 +1388,8 @@ class PyBulletFanEnv(PyBulletEnv):
                     ball_pos = tuple(rng.choice(available_pos))
                     available_pos.remove(ball_pos)
 
-                # Convert continuous positions to grid indices for path validation
+                # Convert continuous positions to grid indices for path
+                # validation
                 tar_grid_idx = None
                 ball_grid_idx = None
                 wall_grid_indices = set()
@@ -1426,7 +1442,8 @@ class PyBulletFanEnv(PyBulletEnv):
                     for fan_obj in self._fans:
                         # Each fan_obj now represents all fans on one side
                         side_idx = fan_obj.side_idx
-                        # Set position based on the center or representative position for the side
+                        # Set position based on the center or representative
+                        # position for the side
                         if side_idx == 2:  # down
                             px = (self.fan_x_lb +
                                   self.fan_x_ub) / 2  # center of back fans
@@ -1514,7 +1531,7 @@ class PyBulletFanEnv(PyBulletEnv):
             tx, ty = init_state.get(self._target, "x"), \
                     init_state.get(self._target, "y")
             target_pos_obj = None
-            for pos_obj in pos_dict.keys():
+            for pos_obj in pos_dict:
                 px, py = init_state.get(pos_obj, "xx"), \
                     init_state.get(pos_obj, "yy")
                 if np.isclose(px, tx, atol=self.position_tolerance) and \
@@ -1535,17 +1552,18 @@ class PyBulletFanEnv(PyBulletEnv):
             tasks.append(EnvironmentTask(init_state, goal_atoms))
         return self._add_pybullet_state_to_tasks(tasks)
 
-    def _get_strategic_wall_position(
+    def _get_strategic_wall_position(  # pylint: disable=redefined-outer-name
             self, ball_pos: Tuple[float, float],
-            target_pos: Tuple[float, float], x_coords: List[float],
-            y_coords: List[float], available_pos: List[Tuple[float, float]],
+            target_pos: Tuple[float, float], _x_coords: List[float],
+            _y_coords: List[float], available_pos: List[Tuple[float, float]],
             rng: np.random.Generator) -> Optional[Tuple[float, float]]:
         """Get a wall position that is between the ball and target."""
         # Find positions that are between ball and target
         between_positions = []
 
         for pos in available_pos:
-            # Check if position is between ball and target (on same row or column)
+            # Check if position is between ball and target (on same row or
+            # column)
             if (pos[0] == ball_pos[0] == target_pos[0] and  # Same column
                     min(ball_pos[1], target_pos[1]) < pos[1] < max(
                         ball_pos[1], target_pos[1])):
@@ -1555,11 +1573,11 @@ class PyBulletFanEnv(PyBulletEnv):
                       ball_pos[0], target_pos[0])):
                 between_positions.append(pos)
 
-        # Return a random position between ball and target, or random if none found
+        # Return a random position between ball and target, or random if none
+        # found
         if between_positions:
             return rng.choice(between_positions)
-        else:
-            return tuple(rng.choice(available_pos)) if available_pos else None
+        return tuple(rng.choice(available_pos)) if available_pos else None
 
     def _has_valid_path(self, start_pos: Tuple[int,
                                                int], target_pos: Tuple[int,
@@ -1605,46 +1623,20 @@ class PyBulletFanEnv(PyBulletEnv):
 
 
 if __name__ == "__main__":
-    import time
-    from pprint import pformat
+    import time  # pylint: disable=ungrouped-imports
     CFG.seed = 0
     CFG.env = "pybullet_fan"
-    # CFG.pybullet_sim_steps_per_action = 20
-    # CFG.fan_fans_blow_opposite_direction = True
     env = PyBulletFanEnv(use_gui=True)
-    rng = np.random.default_rng(CFG.seed)
-    tasks = env._make_tasks(10, CFG.fan_train_num_pos_x,
-                            CFG.fan_train_num_pos_y,
-                            CFG.fan_train_num_walls_per_task, rng)
+    _rng = np.random.default_rng(CFG.seed)
+    _tasks = env._make_tasks(  # pylint: disable=protected-access
+        10, CFG.fan_train_num_pos_x, CFG.fan_train_num_pos_y,
+        CFG.fan_train_num_walls_per_task, _rng)
 
-    for task in tasks:
-        env._reset_state(task.init)
-        # print(f"Task {task.init.pretty_str()}")
-        # print(f"{pformat(utils.abstract(task.init, env.predicates))}")
-        # breakpoint()
+    for _task in _tasks:
+        env._reset_state(_task.init)  # pylint: disable=protected-access
         for _ in range(5000):
-            action = Action(
-                np.array(env._pybullet_robot.initial_joint_positions))
-            env.step(action)
-
-            # Debug code
-            # state = env._get_state()
-            # print(f"{pformat(utils.abstract(state, env.predicates))}")
-            # fans = state.get_objects(env._fan_type)
-            # sides = state.get_objects(env._side_type)
-            # on_fan = None
-            # on_switch = None
-            # for fan in fans:
-            #     for side in sides:
-            #         if env._FanFacingSide_holds(state, [fan, side]):
-            #             print(f"Fan {fan} is facing side {side}, is on: {env._FanOn_holds(state, [fan])}")
-            #             if env._FanOn_holds(state, [fan]):
-            #                 on_fan = fan
-            # for switch in env._switches:
-            #     print(f"Switch {switch} controls fan {state.get(switch, 'controls_fan')} is on: {env._FanOn_holds(state, [switch])}")
-            #     if env._FanOn_holds(state, [switch]):
-            #         on_switch = switch
-            # if on_fan is not None and on_switch is not None:
-            #     print(f"The robot thinks {on_switch} controls {on_fan}: {env._Controls_holds(state, [on_switch, on_fan])}")
-            # print("\n")
+            _action = Action(
+                np.array(env._pybullet_robot  # pylint: disable=protected-access
+                         .initial_joint_positions))
+            env.step(_action)
             time.sleep(0.1)

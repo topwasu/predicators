@@ -7,7 +7,6 @@ python predicators/main.py --approach oracle --env pybullet_grow --seed 1 \
 --sesame_check_expected_atoms False
 """
 
-import logging
 from typing import Any, ClassVar, Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
@@ -75,6 +74,7 @@ class PyBulletGrowEnv(PyBulletEnv):
     jug_init_rot: ClassVar[float] = -np.pi / 2
     jug_handle_height: ClassVar[float] = 0.1
     jug_radius: ClassVar[float] = 0.1
+    jug_handle_offset: ClassVar[float] = 1.05 * jug_radius
     cup_radius: ClassVar[float] = jug_radius
     cup_capacity_ub: ClassVar[float] = 1
 
@@ -109,7 +109,7 @@ class PyBulletGrowEnv(PyBulletEnv):
     _jug_type = Type("jug", ["x", "y", "z", "rot", "is_held", "r", "g", "b"],
                      sim_features=["id", "init_x", "init_y", "init_z"])
 
-    def __init__(self, use_gui: bool = True) -> None:
+    def __init__(self, use_gui: bool = False) -> None:
         # Create the single robot Object
         self._robot = Object("robot", self._robot_type)
 
@@ -166,6 +166,16 @@ class PyBulletGrowEnv(PyBulletEnv):
     @classmethod
     def get_name(cls) -> str:
         return "pybullet_grow"
+
+    @classmethod
+    def _get_jug_handle_grasp(cls, state: State,
+                              jug: Object) -> Tuple[float, float, float]:
+        """Get the grasp position for the jug handle."""
+        rot = state.get(jug, "rot")
+        target_x = state.get(jug, "x") + np.cos(rot) * cls.jug_handle_offset
+        target_y = state.get(jug, "y") + np.sin(rot) * cls.jug_handle_offset
+        target_z = cls.z_lb + cls.jug_handle_height
+        return (target_x, target_y, target_z)
 
     @property
     def predicates(self) -> Set[Predicate]:
@@ -257,7 +267,6 @@ class PyBulletGrowEnv(PyBulletEnv):
 
     def _create_task_specific_objects(self, state: State) -> None:
         """No extra objects to create beyond cups and jugs."""
-        pass
 
     def _extract_feature(self, obj: Object, feature: str) -> float:
         """Extract features for creating the State object."""
@@ -268,7 +277,8 @@ class PyBulletGrowEnv(PyBulletEnv):
                 shape_data = p.getVisualShapeData(
                     liquid_id, physicsClientId=self._physics_client_id)
                 if shape_data:  # (handle the case shape_data might be empty)
-                    # shape_data[0][3][2] is the Z dimension of the box half-extents*2, etc.
+                    # shape_data[0][3][2] is the Z dimension of the box
+                    # half-extents*2, etc.
                     height = shape_data[0][3][2]
                     return height
             return 0.0
@@ -290,7 +300,8 @@ class PyBulletGrowEnv(PyBulletEnv):
             liquid_id = self._create_pybullet_liquid_for_cup(cup, state)
             self._cup_to_liquid_id[cup] = liquid_id
 
-        # Also update the PyBullet color on each cup/jug to match the (r,g,b) in the state
+        # Also update the PyBullet color on each cup/jug to match the (r,g,b) in
+        # the state
         for cup in cups:
             if cup.id is not None:
                 r = state.get(cup, "r")
@@ -379,7 +390,7 @@ class PyBulletGrowEnv(PyBulletEnv):
         closest_cup = None
         closest_cup_dist = float("inf")
         for cup in state.get_objects(self._cup_type):
-            target = PyBulletCoffeeEnv._get_pour_position(state, cup)
+            target = PyBulletCoffeeEnv._get_pour_position(state, cup)  # pylint: disable=protected-access
             sq_dist = np.sum(np.subtract(jug_pos, target)**2)
             if sq_dist < self.pour_pos_tol and sq_dist < closest_cup_dist:
                 closest_cup = cup
@@ -409,7 +420,7 @@ class PyBulletGrowEnv(PyBulletEnv):
         return state.get(jug, "is_held") > 0.5
 
     def _HandEmpty_holds(self, state: State,
-                         objects: Sequence[Object]) -> bool:
+                         _objects: Sequence[Object]) -> bool:
         # (robot, ) = objects
         # return state.get(robot, "fingers") > 0.02
         # using a more robust check
@@ -466,7 +477,7 @@ class PyBulletGrowEnv(PyBulletEnv):
         closest_cup = None
         closest_cup_dist = float("inf")
         for cup_target in state.get_objects(self._cup_type):
-            pour_pos = PyBulletCoffeeEnv._get_pour_position(state, cup_target)
+            pour_pos = PyBulletCoffeeEnv._get_pour_position(state, cup_target)  # pylint: disable=protected-access
             sq_dist_to_pour = np.sum(np.subtract(jug_pos, pour_pos)**2)
             if sq_dist_to_pour < self.pour_pos_tol and \
                 sq_dist_to_pour < closest_cup_dist:
@@ -702,7 +713,7 @@ class PyBulletGrowEnv(PyBulletEnv):
 
 
 if __name__ == "__main__":
-    """Run a simple simulation to test the environment."""
+    # Run a simple simulation to test the environment.
     import time
 
     CFG.env = "pybullet_grow"
@@ -710,13 +721,14 @@ if __name__ == "__main__":
     CFG.pybullet_sim_steps_per_action = 1
 
     env = PyBulletGrowEnv(use_gui=True)
-    rng = np.random.default_rng(CFG.seed)
-    task = env._get_tasks(1, CFG.grow_num_cups_test, CFG.grow_num_jugs_test,
-                          rng)[0]
-    env._reset_state(task.init)
+    _rng = np.random.default_rng(CFG.seed)
+    _task = env._get_tasks(  # pylint: disable=protected-access
+        1, CFG.grow_num_cups_test, CFG.grow_num_jugs_test, _rng)[0]
+    env._reset_state(_task.init)  # pylint: disable=protected-access
 
     while True:
         # Robot does nothing
-        action = Action(np.array(env._pybullet_robot.initial_joint_positions))
-        env.step(action)
+        _joints = env._pybullet_robot.initial_joint_positions  # pylint: disable=protected-access
+        _act = Action(np.array(_joints))
+        env.step(_act)
         time.sleep(0.01)

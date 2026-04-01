@@ -4,8 +4,8 @@ from typing import Dict, Set
 
 from predicators.ground_truth_models import GroundTruthNSRTFactory
 from predicators.settings import CFG
-from predicators.structs import NSRT, DummyParameterizedOption, LiftedAtom, \
-    ParameterizedOption, Predicate, Type, Variable
+from predicators.structs import NSRT, LiftedAtom, ParameterizedOption, \
+    Predicate, Type, Variable
 from predicators.utils import null_sampler
 
 
@@ -22,7 +22,6 @@ class PyBulletFanGroundTruthNSRTFactory(GroundTruthNSRTFactory):
                   options: Dict[str, ParameterizedOption]) -> Set[NSRT]:
         # Types
         robot_type = types["robot"]
-        wall_type = types["wall"]
         position_type = types["loc"]
         switch_type = types["switch"]
         ball_type = types["ball"]
@@ -49,8 +48,6 @@ class PyBulletFanGroundTruthNSRTFactory(GroundTruthNSRTFactory):
         else:
             SwitchOn = predicates["SwitchOn"]
             SwitchOff = predicates["SwitchOff"]
-            if not CFG.fan_known_controls_relation:
-                Controls = predicates["Controls"]
 
         # Options
         switch_option = None
@@ -145,7 +142,8 @@ class PyBulletFanGroundTruthNSRTFactory(GroundTruthNSRTFactory):
                          null_sampler)
         nsrts.add(wait_nsrt)
 
-        # Helper function to create movement NSRTs that use appropriate switch options
+        # Helper function to create movement NSRTs that use appropriate switch
+        # options
         def _make_movement_nsrt(name: str,
                                 option_to_use: ParameterizedOption) -> NSRT:
             robot = Variable("?robot", robot_type)
@@ -181,7 +179,8 @@ class PyBulletFanGroundTruthNSRTFactory(GroundTruthNSRTFactory):
             nsrts.add(_make_movement_nsrt("MoveDown", switch_option))
             nsrts.add(_make_movement_nsrt("MoveUp", switch_option))
         else:
-            # Use separate switch options - movement typically requires turning fan on
+            # Use separate switch options - movement typically requires turning
+            # fan on
             assert switch_on_option is not None
             nsrts.add(_make_movement_nsrt("MoveRight", switch_on_option))
             nsrts.add(_make_movement_nsrt("MoveLeft", switch_on_option))

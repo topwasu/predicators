@@ -4,7 +4,6 @@ from typing import Dict, Sequence, Set
 
 import numpy as np
 
-from predicators.envs.pybullet_balance import PyBulletBalanceEnv
 from predicators.ground_truth_models import GroundTruthNSRTFactory
 from predicators.structs import NSRT, Array, GroundAtom, LiftedAtom, Object, \
     ParameterizedOption, Predicate, State, Type, Variable
@@ -22,8 +21,6 @@ class BalanceGroundTruthNSRTFactory(GroundTruthNSRTFactory):
     def get_nsrts(env_name: str, types: Dict[str, Type],
                   predicates: Dict[str, Predicate],
                   options: Dict[str, ParameterizedOption]) -> Set[NSRT]:
-        env_cls = PyBulletBalanceEnv
-
         # Types
         block_type = types["block"]
         robot_type = types["robot"]
@@ -150,8 +147,8 @@ class BalanceGroundTruthNSRTFactory(GroundTruthNSRTFactory):
         def putonplate_sampler(state: State, goal: Set[GroundAtom],
                                rng: np.random.Generator,
                                objs: Sequence[Object]) -> Array:
-            del state, goal  # unused
-            block, robot, plate = objs
+            del state, goal, rng  # unused
+            _block, _robot, plate = objs
             # Note: normalized coordinates w.r.t. workspace.
             # x = rng.uniform()
             x = 0.09

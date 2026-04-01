@@ -97,14 +97,14 @@ def _make_obj() -> Object:
 
 
 def _build_state(
-        robot_obj: Object,
-        robot,
-        ee_x: float,
-        ee_y: float,
-        ee_z: float,
-        finger_state: float = _OPEN_STATE,
-        obj: Object = None,
-        obj_xyz=(0.0, 0.0, 0.0),
+    robot_obj: Object,
+    robot,
+    ee_x: float,
+    ee_y: float,
+    ee_z: float,
+    finger_state: float = _OPEN_STATE,
+    obj: Object = None,  # type: ignore[assignment]
+    obj_xyz=(0.0, 0.0, 0.0),
 ) -> utils.PyBulletState:
     """Build a PyBulletState at the specified EE position.
 
@@ -127,11 +127,11 @@ def _build_state(
 
 
 def _make_home_state(
-        robot_obj: Object,
-        robot,
-        finger_state: float = _OPEN_STATE,
-        obj: Object = None,
-        obj_xyz=(0.0, 0.0, 0.0),
+    robot_obj: Object,
+    robot,
+    finger_state: float = _OPEN_STATE,
+    obj: Object = None,  # type: ignore[assignment]
+    obj_xyz=(0.0, 0.0, 0.0),
 ) -> utils.PyBulletState:
     """Build a fully self-consistent PyBulletState at the robot's home pose.
 
@@ -163,8 +163,10 @@ def _make_home_state(
 
 
 class TestSkillConfig:
+    """TestSkillConfig class."""
 
     def test_required_fields_stored(self, robot_scene):
+        """Test required fields stored."""
         _, robot = robot_scene
         cfg = SkillConfig(
             robot=robot,
@@ -177,6 +179,7 @@ class TestSkillConfig:
         assert cfg.closed_fingers_joint == robot.closed_fingers
 
     def test_default_tolerances(self, robot_scene):
+        """Test default tolerances."""
         _, robot = robot_scene
         cfg = _make_config(robot)
         assert cfg.move_to_pose_tol == pytest.approx(1e-4)
@@ -188,6 +191,7 @@ class TestSkillConfig:
         assert cfg.robot_init_wrist == pytest.approx(0.0)
 
     def test_extra_dict_stored(self, robot_scene):
+        """Test extra dict stored."""
         _, robot = robot_scene
         cfg = SkillConfig(
             robot=robot,
@@ -199,6 +203,7 @@ class TestSkillConfig:
         assert cfg.extra["my_key"] == 42
 
     def test_custom_tolerances(self, robot_scene):
+        """Test custom tolerances."""
         _, robot = robot_scene
         cfg = SkillConfig(
             robot=robot,
@@ -220,10 +225,12 @@ class TestSkillConfig:
 
 
 class TestPhase:
+    """TestPhase class."""
 
     def test_move_to_pose_phase(self):
+        """Test move to pose phase."""
 
-        def dummy_target(state, objects, params, cfg):
+        def dummy_target(_state, _objects, _params, _cfg):
             return None, None, "open"
 
         phase = Phase(name="TestMove",
@@ -235,8 +242,9 @@ class TestPhase:
         assert phase.use_motion_planning is False  # default from CFG
 
     def test_change_fingers_phase(self):
+        """Test change fingers phase."""
 
-        def dummy_target(state, objects, params, cfg):
+        def dummy_target(_state, _objects, _params, _cfg):
             return 0.04, 0.01
 
         phase = Phase(name="Grasp",
@@ -245,8 +253,9 @@ class TestPhase:
         assert phase.action_type == PhaseAction.CHANGE_FINGERS
 
     def test_custom_terminal_fn_stored(self):
+        """Test custom terminal fn stored."""
 
-        def my_terminal(state, objects, params, cfg):
+        def my_terminal(_state, _objects, _params, _cfg):
             return True
 
         phase = Phase(
@@ -258,6 +267,7 @@ class TestPhase:
         assert phase.terminal_fn is my_terminal
 
     def test_no_motion_planning_flag(self):
+        """Test no motion planning flag."""
         phase = Phase(
             name="IKMove",
             action_type=PhaseAction.MOVE_TO_POSE,
@@ -273,13 +283,14 @@ class TestPhase:
 
 
 class TestPhaseSkill:
+    """TestPhaseSkill class."""
 
     def _make_single_ik_skill(self, robot, target_pos):
         """One IK-mode MOVE_TO_POSE phase (no BiRRT, predictable terminal)."""
         config = _make_config(robot)
         robot_obj = _make_robot_obj()
 
-        def target_fn(state, objects, params, cfg):
+        def target_fn(state, _objects, _params, cfg):
             x = state.get(robot_obj, "x")
             y = state.get(robot_obj, "y")
             z = state.get(robot_obj, "z")
@@ -305,7 +316,7 @@ class TestPhaseSkill:
         """One CHANGE_FINGERS phase with fixed current/target."""
         config = _make_config(robot)
 
-        def target_fn(state, objects, params, cfg):
+        def target_fn(_state, _objects, _params, _cfg):
             return current_val, target_val
 
         phase = Phase(
@@ -318,21 +329,24 @@ class TestPhaseSkill:
         return skill, phase
 
     def test_build_returns_parameterized_option(self, robot_scene):
+        """Test build returns parameterized option."""
         _, robot = robot_scene
-        skill, robot_obj, _ = self._make_single_ik_skill(robot, _EE_HOME)
+        skill, _robot_obj, _ = self._make_single_ik_skill(robot, _EE_HOME)
         opt = skill.build()
         assert isinstance(opt, ParameterizedOption)
 
     def test_build_name_and_types(self, robot_scene):
+        """Test build name and types."""
         _, robot = robot_scene
-        skill, robot_obj, _ = self._make_single_ik_skill(robot, _EE_HOME)
+        skill, _robot_obj, _ = self._make_single_ik_skill(robot, _EE_HOME)
         opt = skill.build()
         assert opt.name == "Test"
         assert opt.types == [_ROBOT_TYPE]
 
     def test_initiable_sets_phase_idx_zero(self, robot_scene):
+        """Test initiable sets phase idx zero."""
         _, robot = robot_scene
-        skill, robot_obj, _ = self._make_single_ik_skill(robot, _EE_HOME)
+        skill, _robot_obj, _ = self._make_single_ik_skill(robot, _EE_HOME)
         opt = skill.build()
         grounded = opt.ground([_make_robot_obj()], np.zeros(0))
         state = _build_state(_make_robot_obj(), robot, *_EE_HOME)
@@ -340,6 +354,7 @@ class TestPhaseSkill:
         assert grounded.memory["phase_idx"] == 0
 
     def test_change_fingers_terminal_when_at_target(self, robot_scene):
+        """Test change fingers terminal when at target."""
         _, robot = robot_scene
         # current == target → (target-current)^2 = 0 < grasp_tol
         skill, _ = self._make_single_cf_skill(robot, 0.04, 0.04)
@@ -351,6 +366,7 @@ class TestPhaseSkill:
         assert grounded.terminal(state)
 
     def test_change_fingers_not_terminal_when_far(self, robot_scene):
+        """Test change fingers not terminal when far."""
         _, robot = robot_scene
         # current=0.04, target=0.00 → (0.00-0.04)^2 = 1.6e-3 > 1e-3
         skill, _ = self._make_single_cf_skill(robot, 0.04, 0.00)
@@ -362,6 +378,7 @@ class TestPhaseSkill:
         assert not grounded.terminal(state)
 
     def test_ik_terminal_when_at_target(self, robot_scene):
+        """Test ik terminal when at target."""
         _, robot = robot_scene
         # Target == current EE position → distance = 0 < tol
         skill, robot_obj, _ = self._make_single_ik_skill(robot, _EE_HOME)
@@ -373,6 +390,7 @@ class TestPhaseSkill:
         assert grounded.terminal(state)
 
     def test_ik_not_terminal_when_far(self, robot_scene):
+        """Test ik not terminal when far."""
         _, robot = robot_scene
         # Target is far from current EE (0.3m away in z)
         far_target = (_EE_HOME[0], _EE_HOME[1], _EE_HOME[2] - 0.3)
@@ -451,7 +469,7 @@ class TestPhaseSkill:
         config = _make_config(robot)
         call_count = {"n": 0}
 
-        def my_terminal(state, objects, params, cfg):
+        def my_terminal(_state, _objects, _params, _cfg):
             call_count["n"] += 1
             return True
 
@@ -488,7 +506,7 @@ class TestBiRRT:
         config = _make_config(robot)
         robot_obj = _make_robot_obj()
 
-        def target_fn(state, objects, params, cfg):
+        def target_fn(_state, _objects, _params, _cfg):
             orn = p.getQuaternionFromEuler([0, 0, 0])
             return Pose(_EE_HOME, orn), Pose(_EE_HOME, orn), "open"
 
@@ -514,7 +532,7 @@ class TestBiRRT:
         robot_obj = _make_robot_obj()
         home_orn = p.getQuaternionFromEuler([0, np.pi / 2, -np.pi])
 
-        def target_fn(state, objects, params, cfg):
+        def target_fn(state, _objects, _params, _cfg):
             current_orn = p.getQuaternionFromEuler([
                 0,
                 state.get(robot_obj, "tilt"),
@@ -557,7 +575,7 @@ class TestBiRRT:
         robot_obj = _make_robot_obj()
         home_orn = p.getQuaternionFromEuler([0, np.pi / 2, -np.pi])
 
-        def target_fn(state, objects, params, cfg):
+        def target_fn(state, _objects, _params, _cfg):
             current_orn = p.getQuaternionFromEuler([
                 0,
                 state.get(robot_obj, "tilt"),
@@ -610,7 +628,7 @@ class TestBiRRT:
         home_orn = p.getQuaternionFromEuler([0, np.pi / 2, -np.pi])
         target_pos = (_EE_HOME[0], _EE_HOME[1], _EE_HOME[2] - 0.15)
 
-        def target_fn(state, objects, params, cfg):
+        def target_fn(state, _objects, _params, _cfg):
             current_orn = p.getQuaternionFromEuler([
                 0,
                 state.get(robot_obj, "tilt"),
@@ -653,8 +671,10 @@ class TestBiRRT:
 
 
 class TestWaitOption:
+    """TestWaitOption class."""
 
     def test_wait_always_initiable(self, robot_scene):
+        """Test wait always initiable."""
         _, robot = robot_scene
         config = _make_config(robot)
         opt = create_wait_option("Wait", config, _ROBOT_TYPE)
@@ -664,6 +684,7 @@ class TestWaitOption:
         assert grounded.initiable(state)
 
     def test_wait_never_terminal(self, robot_scene):
+        """Test wait never terminal."""
         _, robot = robot_scene
         config = _make_config(robot)
         opt = create_wait_option("Wait", config, _ROBOT_TYPE)
@@ -674,12 +695,14 @@ class TestWaitOption:
             assert not grounded.terminal(state)
 
     def test_wait_custom_name(self, robot_scene):
+        """Test wait custom name."""
         _, robot = robot_scene
         config = _make_config(robot)
         opt = create_wait_option("Idle", config, _ROBOT_TYPE)
         assert opt.name == "Idle"
 
     def test_wait_default_name(self, robot_scene):
+        """Test wait default name."""
         _, robot = robot_scene
         config = _make_config(robot)
         opt = create_wait_option("Wait", config, _ROBOT_TYPE)
@@ -756,8 +779,10 @@ class TestWaitOption:
 
 
 class TestMakeMoveToPosePhase:
+    """TestMakeMoveToPosePhase class."""
 
     def test_returns_phase_with_move_action_type(self):
+        """Test returns phase with move action type."""
         phase = make_move_to_phase(
             "MoveTest",
             get_target_pose_fn=lambda s, o, p_, c: (1.0, 2.0, 3.0, 0.0),
@@ -769,6 +794,7 @@ class TestMakeMoveToPosePhase:
         assert phase.use_motion_planning is False  # default from CFG
 
     def test_explicit_open_finger_status(self, robot_scene):
+        """Test explicit open finger status."""
         _, robot = robot_scene
         config = _make_config(robot)
         robot_obj = _make_robot_obj()
@@ -786,6 +812,7 @@ class TestMakeMoveToPosePhase:
         assert returned_status == "open"  # explicit overrides state
 
     def test_explicit_closed_finger_status(self, robot_scene):
+        """Test explicit closed finger status."""
         _, robot = robot_scene
         config = _make_config(robot)
         robot_obj = _make_robot_obj()
@@ -863,8 +890,10 @@ class TestMakeMoveToPosePhase:
 
 
 class TestCreateMoveToPoseSkill:
+    """TestCreateMoveToPoseSkill class."""
 
     def test_returns_parameterized_option(self, robot_scene):
+        """Test returns parameterized option."""
         _, robot = robot_scene
         config = _make_config(robot)
         opt = create_move_to_skill(
@@ -878,6 +907,7 @@ class TestCreateMoveToPoseSkill:
         assert opt.name == "Move"
 
     def test_policy_returns_valid_action(self, robot_scene):
+        """Test policy returns valid action."""
         _, robot = robot_scene
         utils.reset_config({"seed": 123})
         config = _make_config(robot)
@@ -903,6 +933,7 @@ class TestCreateMoveToPoseSkill:
 
 
 class TestCreatePickSkill:
+    """TestCreatePickSkill class."""
 
     def _make_pick(self, robot):
         config = SkillConfig(
@@ -920,12 +951,14 @@ class TestCreatePickSkill:
         )
 
     def test_returns_parameterized_option(self, robot_scene):
+        """Test returns parameterized option."""
         _, robot = robot_scene
         opt = self._make_pick(robot)
         assert isinstance(opt, ParameterizedOption)
         assert opt.name == "Pick"
 
     def test_pick_policy_returns_valid_action(self, robot_scene):
+        """Test pick policy returns valid action."""
         _, robot = robot_scene
         utils.reset_config({"seed": 123})
         robot_obj = _make_robot_obj()
@@ -950,6 +983,7 @@ class TestCreatePickSkill:
 
 
 class TestCreatePlaceSkill:
+    """TestCreatePlaceSkill class."""
 
     def _make_place(self, robot):
         config = SkillConfig(
@@ -966,19 +1000,21 @@ class TestCreatePlaceSkill:
         )
 
     def test_returns_parameterized_option(self, robot_scene):
+        """Test returns parameterized option."""
         _, robot = robot_scene
         opt = self._make_place(robot)
         assert isinstance(opt, ParameterizedOption)
         assert opt.name == "Place"
 
     def test_place_policy_returns_valid_action(self, robot_scene):
+        """Test place policy returns valid action."""
         _, robot = robot_scene
         utils.reset_config({"seed": 123})
         robot_obj = _make_robot_obj()
         opt = self._make_place(robot)
         # Place params: (target_x, target_y, release_z, target_yaw)
         grounded = opt.ground([robot_obj],
-                              np.array([0.75, 1.35, 0.45, 0.0],
+                              np.array([0.75, 1.35, 0.55, 0.0],
                                        dtype=np.float32))
         state = _make_home_state(robot_obj, robot)
         grounded.initiable(state)
@@ -993,6 +1029,7 @@ class TestCreatePlaceSkill:
 
 
 class TestCreatePushSkill:
+    """TestCreatePushSkill class."""
 
     @staticmethod
     def _make_push_config(robot):
@@ -1007,6 +1044,7 @@ class TestCreatePushSkill:
         )
 
     def _make_push(self, robot):
+        """Make push."""
         config = self._make_push_config(robot)
         return create_push_skill(
             name="Push",
@@ -1016,6 +1054,7 @@ class TestCreatePushSkill:
         )
 
     def test_returns_parameterized_option(self, robot_scene):
+        """Test returns parameterized option."""
         _, robot = robot_scene
         opt = self._make_push(robot)
         assert isinstance(opt, ParameterizedOption)

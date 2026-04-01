@@ -152,12 +152,12 @@ def create_dataframes(
     df = create_raw_dataframe(column_names_and_keys, derived_keys)
 
     if keep_max_cycle_only:
-        # Filter to keep only the highest cycle for each (experiment_id, seed, env, approach, excluded_predicates) combination
+        # Filter to keep only the highest cycle for each (experiment_id, seed, env, approach, excluded_predicates) combination  # pylint: disable=line-too-long
         # Convert cycle to numeric for proper sorting (handle None as -1)
         df_filtered = df.copy()
         cycle_col = None
         for col in df_filtered.columns:
-            if col == 'ONLINE_LEARNING_CYCLE' or col == 'CYCLE':
+            if col in ('ONLINE_LEARNING_CYCLE', 'CYCLE'):
                 cycle_col = col
                 break
 

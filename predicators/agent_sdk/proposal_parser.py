@@ -1,5 +1,4 @@
 """Safe execution and validation of agent-generated code proposals."""
-import logging
 import traceback
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
@@ -36,7 +35,7 @@ def exec_code_safely(code: str, context: Dict[str, Any],
     """
     try:
         exec(code, context)  # pylint: disable=exec-used
-    except Exception:
+    except Exception:  # pylint: disable=broad-except
         return None, traceback.format_exc()
 
     if expected_var not in context:
@@ -58,6 +57,7 @@ def build_exec_context(
         extra_context: Additional bindings to inject (e.g. option builder
             helpers). Merged after standard bindings so it can override them.
     """
+    # pylint: disable=reimported,import-outside-toplevel,redefined-outer-name
     import numpy as np
     import torch
     from gym.spaces import Box
@@ -67,6 +67,8 @@ def build_exec_context(
         NSPredicate, Object, ParameterizedOption, Predicate, State, Task, \
         Type, Variable
     from predicators.utils import ConstantDelay, DiscreteGaussianDelay
+
+    # pylint: enable=reimported,import-outside-toplevel,redefined-outer-name
 
     context: Dict[str, Any] = {}
 
@@ -95,9 +97,12 @@ def build_exec_context(
     context["DiscreteGaussianDelay"] = DiscreteGaussianDelay
 
     # Typing
-    from typing import List as ListT
-    from typing import Sequence
-    from typing import Set as SetT
+    from typing import \
+        List as ListT  # pylint: disable=reimported,import-outside-toplevel
+    from typing import \
+        Sequence  # pylint: disable=reimported,import-outside-toplevel
+    from typing import \
+        Set as SetT  # pylint: disable=reimported,import-outside-toplevel
     context["List"] = ListT
     context["Set"] = SetT
     context["Sequence"] = Sequence
@@ -110,7 +115,7 @@ def build_exec_context(
     for p in predicates:
         context[p.name] = p
         # Also expose classifiers
-        context[f"_{p.name}_holds"] = p._classifier
+        context[f"_{p.name}_holds"] = p._classifier  # pylint: disable=protected-access
 
     # All current options by name
     for o in options:
@@ -137,7 +142,7 @@ def validate_predicate(pred: Predicate, types: Set[Type],
     # Try to evaluate the predicate on the example state
     try:
         utils.abstract(example_state, {pred})
-    except Exception:
+    except Exception:  # pylint: disable=broad-except
         return (f"Predicate '{pred.name}' failed evaluation on example state: "
                 f"{traceback.format_exc()}")
 

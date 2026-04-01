@@ -9,7 +9,8 @@ Usage:
 
 Options:
     --skip-run      Skip running the experiments (just convert existing MP4s)
-    --config, -c    Config file to use (default: mara2/random_actions_pybullet.yaml)
+    --config, -c    Config file to use
+                    (default: mara2/random_actions_pybullet.yaml)
     --video-dir     Directory where MP4s are written (default: videos)
     --output-dir    Directory for output GIFs
                     (default: docs/envs/assets/random_action_gifs)
@@ -19,7 +20,6 @@ Options:
 import argparse
 import glob
 import os
-import re
 import subprocess
 import sys
 
@@ -45,28 +45,6 @@ def mp4_to_gif(
     """Convert an MP4 file to an optimized GIF using ffmpeg."""
     os.makedirs(os.path.dirname(gif_path), exist_ok=True)
     # Two-pass ffmpeg: generate palette then use it for high-quality GIF
-    palette_cmd = [
-        "ffmpeg",
-        "-y",
-        "-i",
-        mp4_path,
-        "-vf",
-        f"fps={fps},scale={width}:-1:flags=lanczos,palettegen=stats_mode=diff",
-        "-f",
-        "image2",
-        "pipe:1",
-    ]
-    gif_cmd = [
-        "ffmpeg",
-        "-y",
-        "-i",
-        mp4_path,
-        "-i",
-        "pipe:0",
-        "-lavfi",
-        f"fps={fps},scale={width}:-1:flags=lanczos [x]; [x][1:v] paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle",
-        gif_path,
-    ]
     # Simpler single-pass approach that's more robust
     cmd = [
         "ffmpeg",
@@ -74,13 +52,16 @@ def mp4_to_gif(
         "-i",
         mp4_path,
         "-vf",
-        f"fps={fps},scale={width}:-1:flags=lanczos,split[s0][s1];[s0]palettegen=stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle",
+        (f"fps={fps},scale={width}:-1:flags=lanczos,"
+         "split[s0][s1];[s0]palettegen=stats_mode=diff[p];"
+         "[s1][p]paletteuse=dither=bayer:bayer_scale=5:"
+         "diff_mode=rectangle"),
         "-loop",
         "0",
         gif_path,
     ]
     try:
-        result = subprocess.run(
+        _result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
@@ -97,7 +78,8 @@ def find_mp4s(video_dir: str) -> dict[str, str]:
 
     Returns a dict of {env_short_name: mp4_path}.
     The naming convention from the framework is:
-        {env}__{approach}__{seed}__{excluded}__{included}__{experiment_id}__task{n}.mp4
+        {env}__{approach}__{seed}__{excluded}__{included}__
+        {experiment_id}__task{n}.mp4
     We extract the env name (e.g. 'pybullet_cover') from the filename.
     """
     mp4s: dict[str, str] = {}
@@ -121,6 +103,7 @@ def find_mp4s(video_dir: str) -> dict[str, str]:
 
 
 def main() -> None:
+    """Run the GIF generation pipeline."""
     parser = argparse.ArgumentParser(
         description="Generate random-action GIFs for PyBullet environments.")
     parser.add_argument(

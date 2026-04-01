@@ -25,7 +25,6 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
-from pprint import pformat
 from typing import TYPE_CHECKING, Any, Callable, ClassVar, Collection, Dict, \
     FrozenSet, Generator, Generic, Hashable, Iterable, Iterator, List, \
     Optional, Sequence, Set, Tuple
@@ -59,14 +58,14 @@ from predicators.pybullet_helpers.joint import JointPositions
 from predicators.settings import CFG, GlobalSettings
 from predicators.structs import NSRT, Action, Array, AtomOptionTrajectory, \
     CausalProcess, DelayDistribution, DerivedPredicate, DummyOption, \
-    EntToEntSub, ExogenousProcess, GroundAtom, GroundAtomTrajectory, \
+    EntToEntSub, GroundAtom, GroundAtomTrajectory, \
     GroundNSRTOrSTRIPSOperator, Image, LDLRule, LiftedAtom, \
     LiftedDecisionList, LiftedOrGroundAtom, LowLevelTrajectory, Mask, \
     Metrics, NSRTOrSTRIPSOperator, Object, ObjectOrVariable, Observation, \
     OptionSpec, ParameterizedOption, Predicate, Segment, State, \
     STRIPSOperator, Task, Type, Variable, VarToObjSub, Video, VLMPredicate, \
-    _GroundEndogenousProcess, _GroundExogenousProcess, _GroundLDLRule, \
-    _GroundNSRT, _GroundSTRIPSOperator, _Option, _TypedEntity
+    _GroundEndogenousProcess, _GroundLDLRule, _GroundNSRT, \
+    _GroundSTRIPSOperator, _Option, _TypedEntity
 from predicators.third_party.fast_downward_translator.translate import \
     main as downward_translate
 
@@ -972,11 +971,8 @@ class LinearChainParameterizedOption(ParameterizedOption):
             memory["current_child_index"] = current_index
             current_child = self._children[current_index]
             child_memory = memory["child_memory"][current_index]
-            try:
-                assert current_child.initiable(state, child_memory, objects,
-                                               params)
-            except:
-                breakpoint()
+            assert current_child.initiable(state, child_memory, objects,
+                                           params)
         # logging.debug(f"Executing {current_child.name}")
         return current_child.policy(state, child_memory, objects, params)
 
@@ -1057,13 +1053,13 @@ class PyBulletState(State):
         return cast(JointPositions, jp)
 
     @property
-    def state_image(self) -> Image:
+    def state_image(self) -> PIL.Image.Image:
         """Expose the current image state in the simulator_state."""
         assert isinstance(self.simulator_state, Dict)
         return self.simulator_state["unlabeled_image"]
 
     @property
-    def labeled_image(self) -> Optional[Image]:
+    def labeled_image(self) -> Optional[PIL.Image.Image]:
         """Expose the current image state in the simulator_state."""
         assert isinstance(self.simulator_state, Dict)
         return self.simulator_state.get("images")
@@ -1079,10 +1075,10 @@ class PyBulletState(State):
         return State(self.data).allclose(State(other.data))
 
     def copy(self) -> PyBulletState:
-        copy = super().copy()
-        state_dict_copy = copy.data
+        copied = super().copy()
+        state_dict_copy = copied.data
         # simulator_state_copy = list(self.joint_positions)
-        simulator_state_copy = copy.simulator_state
+        simulator_state_copy = copied.simulator_state
         return PyBulletState(state_dict_copy, simulator_state_copy)
 
     def get_obj_mask(self, obj: Object) -> Mask:
@@ -1114,28 +1110,21 @@ BoundingBox = namedtuple('BoundingBox', 'left lower right upper')
 
 
 @dataclass
-class RawState(PyBulletState):
+class VLMState(PyBulletState):
+    """PyBulletState extended with VLM/visual perception capabilities."""
     state_image: PIL.Image.Image = None  # type: ignore[assignment]
     obj_mask_dict: Dict[Object, Mask] = field(default_factory=dict)
     labeled_image: Optional[PIL.Image.Image] = None  # type: ignore[assignment]
     option_history: Optional[List[str]] = None
     bbox_features: Dict[Object, np.ndarray] = field(
         default_factory=lambda: defaultdict(lambda: np.zeros(4)))
-    prev_state: Optional[RawState] = None
-    next_state: Optional[RawState] = None
+    prev_state: Optional[VLMState] = None
 
     def __hash__(self) -> int:
-        # Convert the dictionary to a tuple of key-value pairs and hash it
-        # data_hash = hash(tuple(sorted(self.data.items())))
         data_tuple = tuple((k, tuple(v)) for k, v in sorted(self.data.items()))
         if self.simulator_state is not None:
             data_tuple += tuple(self.simulator_state)
-        data_hash = hash(data_tuple)
-        # # Hash the simulator_state
-        # simulator_state_hash = hash(self.simulator_state)
-        # Combine the two hashes
-        # return hash((data_hash, simulator_state_hash))
-        return data_hash
+        return hash(data_tuple)
 
     def evaluate_simple_assertion(
             self, assertion: str, image: Tuple[BoundingBox,
@@ -1159,7 +1148,7 @@ class RawState(PyBulletState):
         msg += ".\n"
 
         if CFG.nsp_pred_include_state_str_in_prompt:
-            msg += f"We have the object positions and the robot's "\
+            msg += "We have the object positions and the robot's "\
                     "proprioception:\n"
             msg += self.dict_str(indent=2,
                                  object_features=False,
@@ -1171,11 +1160,6 @@ class RawState(PyBulletState):
             msg += "For context, this is at the beginning of a task, before "\
                 "the robot has done anything.\n"
         else:
-            # return f"For context, this is right after the robot has "\
-            # f"successfully executed its [{', '.join(self.option_history[-2:])}]"\
-            # f" option sequence."
-            # msg = f"For context, this state is right after the robot has "\
-            # f"successfully executed its {self.option_history[-1]} action."
             msg += "For context, the state is right after the robot has"\
                 " successfully executed the action "\
                 f"{self.option_history[-1]}."
@@ -1207,14 +1191,9 @@ class RawState(PyBulletState):
 
     def set(self, obj: Object, feature_name: str, feature_val: Any) -> None:
         """Set the value of an object feature by name."""
-        try:
-            idx = obj.type.feature_names.index(feature_name)
-        except:
-            breakpoint()
+        idx = obj.type.feature_names.index(feature_name)
         standard_feature_len = len(self.data[obj])
         if idx >= standard_feature_len:
-            # When setting the bounding box features for the first time
-            # So we'd first append 4 dimension and try to set again
             self.bbox_features[obj][idx - standard_feature_len] = feature_val
         else:
             self.data[obj][idx] = feature_val
@@ -1224,13 +1203,13 @@ class RawState(PyBulletState):
         standard_feature_len = len(self.data[obj])
         if idx >= standard_feature_len:
             return self.bbox_features[obj][idx - standard_feature_len]
-        else:
-            return self.data[obj][idx]
+        return self.data[obj][idx]
 
-    def dict_str(
-            self,  # type: ignore[override]
+    def dict_str(  # type: ignore[override]
+            self,
             indent: int = 0,
             object_features: bool = True,
+            num_decimal_points: int = 2,
             use_object_id: bool = False,
             position_proprio_features: bool = False) -> str:
         """Return a dictionary representation of the state."""
@@ -1241,39 +1220,22 @@ class RawState(PyBulletState):
                     obj.type.feature_names,
                     np.concatenate([self[obj], self.bbox_features[obj]])
                     if self.bbox_features else self[obj]):
-                # include if it's proprioception feature, or position/bbox
-                # feature, or object_features is True
-                # if (obj.type.name == "robot" and \
-                #     attribute not in ["bbox_left", "bbox_right", "bbox_upper",
-                #         "pose_x", "pose_y", "pose_z", "pose_y_norm",
-                #                       "bbox_lower"]) or object_features:
-                #     #    attribute in ["pose_x", "pose_y", "pose_z", "bbox_left",
-                #     # "bbox_right", "bbox_upper", "bbox_lower"] or\
-                #     if isinstance(value, (float, int, np.float32)):
-                #         value = round(float(value), 1)
-                #     obj_dict[attribute] = value
-                if (position_proprio_features and attribute in [
-                        # "pose_x", "pose_y", "pose_z", "x", "y", "z",
-                        "rot",
-                        "fingers"
-                ]) or (object_features and attribute not in [
-                        "is_heavy",
-                        # "grasp",
-                        # "held",
-                        # "is_held",
-                ]):
+                if (position_proprio_features and attribute
+                        in ["rot", "fingers"]) or (object_features
+                                                   and attribute not in [
+                                                       "is_heavy",
+                                                   ]):
                     if isinstance(value, (float, int, np.float32)):
                         value = round(float(value), 1)
                     obj_dict[attribute] = value
 
-            if use_object_id: obj_name = obj.id_name
-            else: obj_name = obj.name
+            if use_object_id:
+                obj_name = obj.id_name
+            else:
+                obj_name = obj.name
             state_dict[f"{obj_name}:{obj.type.name}"] = obj_dict
 
-        # Create a string of n_space spaces
         spaces = " " * indent
-
-        # Create a PrettyPrinter with a large width
         dict_str = spaces + "{"
         n_keys = len(state_dict.keys())
         for i, (key, value) in enumerate(state_dict.items()):
@@ -1292,76 +1254,55 @@ class RawState(PyBulletState):
         return dict_str
 
     def __eq__(self, other: object) -> bool:
-        # Compare the data and simulator_state
-        assert isinstance(other, RawState)
-
+        assert isinstance(other, VLMState)
         if len(self.data) != len(other.data):
             return False
-
         for key, value in self.data.items():
             if key not in other.data or not np.array_equal(
                     value, other.data[key]):
                 return False
-
         return self.simulator_state == other.simulator_state
 
     def label_all_objects(self) -> None:
         state_ip = ImagePatch(self)
-        # state_ip.cropped_image_in_PIL.save(f"images/obs_before_label_all.png")
-        # labels = [obj.id for obj in self.obj_mask_dict.keys()]
-        # masks = self.obj_mask_dict.values()
-        # state_ip.label_all_objects(masks, labels)
         state_ip.label_all_objects(self.obj_mask_dict)
-        # state_ip.label_object(mask, obj.id)
-        # state_ip.cropped_image_in_PIL.save(f"images/obs_after_label_all.png")
         self.labeled_image = state_ip.cropped_image_in_PIL
 
-    def copy(self) -> RawState:
+    def copy(self) -> VLMState:
         pybullet_state_copy = super().copy()
-        # simulator_state_copy = list(self.joint_positions)
         state_image_copy = copy.copy(self.state_image)
         obj_mask_copy = copy.deepcopy(self.obj_mask_dict)
         labeled_image_copy = copy.copy(self.labeled_image)
         option_history_copy = copy.copy(self.option_history)
         bbox_features_copy = copy.deepcopy(self.bbox_features)
         prev_state_copy = self.prev_state.copy() if self.prev_state else None
-        return RawState(pybullet_state_copy.data,
+        return VLMState(pybullet_state_copy.data,
                         pybullet_state_copy.simulator_state, state_image_copy,
                         obj_mask_copy, labeled_image_copy, option_history_copy,
                         bbox_features_copy, prev_state_copy)
 
-    def get_obj_mask(self, object: Object) -> Mask:
+    def get_obj_mask(self, obj: Object) -> Mask:
         """Return the mask for the object."""
-        return self.obj_mask_dict[object]
+        return self.obj_mask_dict[obj]
 
-    def get_obj_bbox(self, object: Object) -> BoundingBox:
-        """Get the bounding box of the object in the state image The origin is
-        bottom left corner--(0, 0)"""
-        mask = self.get_obj_mask(object)
+    def get_obj_bbox(self, obj: Object) -> BoundingBox:
+        """Get the bounding box of the object in the state image."""
+        mask = self.get_obj_mask(obj)
         return mask_to_bbox(mask)
 
-    def crop_to_objects(
+    def crop_to_objects(  # pylint: disable=missing-function-docstring
             self,
             objects: Sequence[Object],
-            # left_margin: int = 15,
-            # lower_margin: int = 15,
-            # right_margin: int = 15,
-            # top_margin: int = 20
             left_margin: int = 30,
             lower_margin: int = 30,
             right_margin: int = 30,
             top_margin: int = 30) -> Tuple[BoundingBox, Sequence[Object]]:
-
         bboxes = [self.get_obj_bbox(obj) for obj in objects]
         bbox = smallest_bbox_from_bboxes(bboxes)
         return (BoundingBox(
             max(bbox.left - left_margin, 0), max(bbox.lower - lower_margin, 0),
             min(bbox.right + right_margin, self.state_image.width),
             min(bbox.upper + top_margin, self.state_image.height)), objects)
-
-        # state_ip = ImagePatch(self, attn_objects=objects)
-        # return state_ip.crop_to_objects(objects, left_margin, lower_margin,
-        #                                 right_margin, top_margin)
 
 
 @dataclass
@@ -1495,7 +1436,7 @@ def run_policy(
                 start_time = time.perf_counter()
                 act = policy(state)
                 metrics["policy_call_time"] += time.perf_counter() - start_time
-            except Exception as e:
+            except Exception as e:  # pylint: disable=broad-except
                 if not CFG.video_not_break_on_exception:
                     if exceptions_to_break_on is not None and \
                         type(e) in exceptions_to_break_on:
@@ -1683,15 +1624,16 @@ def option_policy_to_policy(
 
         # whether the noop option should terminate
         wait_terminate = False
-        if CFG.wait_option_terminate_on_atom_change and cur_option.name == "Wait":
+        if CFG.wait_option_terminate_on_atom_change \
+                and cur_option.name == "Wait":
             assert abstract_function is not None
             assert last_state is not None
             cur_atoms = abstract_function(state)
             prev_atoms = abstract_function(last_state)
             if cur_atoms != prev_atoms:
                 logging.debug(f"Wait terminating due to atom change: "
-                             f"Add: {sorted(cur_atoms-prev_atoms)} "
-                             f"Del: {sorted(prev_atoms-cur_atoms)}")
+                              f"Add: {sorted(cur_atoms-prev_atoms)} "
+                              f"Del: {sorted(prev_atoms-cur_atoms)}")
                 wait_terminate = True
 
         last_state = state
@@ -1707,7 +1649,7 @@ def option_policy_to_policy(
                 else:
                     reason = "unknown"
                 logging.info(f"[{cur_option.name}] Terminated: {reason} "
-                              f"(after {num_cur_option_steps} steps)\n")
+                             f"(after {num_cur_option_steps} steps)\n")
             try:
                 cur_option = option_policy(state)
             except OptionExecutionFailure as e:
@@ -1852,6 +1794,7 @@ def process_plan_to_greedy_policy(
     necessary_atoms_seq: Optional[Sequence[Set[GroundAtom]]] = None,
     abstract_function: Optional[Callable[[State], Set[GroundAtom]]] = None
 ) -> Callable[[State], Action]:
+    """Convert a process plan to a greedy policy."""
     option_policy = process_plan_to_greedy_option_policy(
         process_plan, goal, rng, necessary_atoms_seq=necessary_atoms_seq)
     return option_policy_to_policy(option_policy,
@@ -2724,13 +2667,12 @@ def create_llm_by_name(
     """Create particular llm using a provided name."""
     if CFG.pretrained_model_service_provider == "openai":
         return OpenAILLM(model_name)
-    elif CFG.pretrained_model_service_provider == "google":
+    if CFG.pretrained_model_service_provider == "google":
         return GoogleGeminiLLM(model_name)
-    elif CFG.pretrained_model_service_provider == "openrouter":
+    if CFG.pretrained_model_service_provider == "openrouter":
         return OpenRouterLLM(model_name)
-    else:
-        raise ValueError(f"Unknown pretrained model service provider: "
-                         f"{CFG.pretrained_model_service_provider}")
+    raise ValueError(f"Unknown pretrained model service provider: "
+                     f"{CFG.pretrained_model_service_provider}")
 
 
 def create_vlm_by_name(
@@ -2738,13 +2680,12 @@ def create_vlm_by_name(
     """Create particular vlm using a provided name."""
     if CFG.pretrained_model_service_provider == "openai":
         return OpenAIVLM(model_name)
-    elif CFG.pretrained_model_service_provider == "google":
+    if CFG.pretrained_model_service_provider == "google":
         return GoogleGeminiVLM(model_name)
-    elif CFG.pretrained_model_service_provider == "openrouter":
+    if CFG.pretrained_model_service_provider == "openrouter":
         return OpenRouterVLM(model_name)
-    else:
-        raise ValueError(f"Unknown pretrained model service provider: "
-                         f"{CFG.pretrained_model_service_provider}")
+    raise ValueError(f"Unknown pretrained model service provider: "
+                     f"{CFG.pretrained_model_service_provider}")
 
 
 def parse_model_output_into_option_plan(
@@ -2951,6 +2892,8 @@ def query_vlm_for_atom_vals(
         return set()
     true_atoms: Set[GroundAtom] = set()
     # Get quantities necessary to construct prompt to query VLM.
+    if state.simulator_state is None:
+        return true_atoms
     assert state.simulator_state is not None
     assert isinstance(state.simulator_state["images"], List)
     curr_state_imgs = state.simulator_state["images"]
@@ -3409,8 +3352,8 @@ def create_ground_atom_option_dataset(
     annotate with options (HLA)."""
     ground_atom_option_dataset = []
     for traj in trajectories:
-        # TODO: this is current just based on the current states. We would
-        # probably want to extend this to state history.
+        # Note: this is currently just based on the current states.
+        # We may want to extend this to state history in the future.
         atoms = [abstract(s, predicates) for s in traj.states]
         options = [a.get_option() for a in traj.actions]
         ground_atom_option_dataset.append(
@@ -3581,8 +3524,7 @@ def get_applicable_operators(
     Note: the order may be nondeterministic. Users should be invariant.
     """
     for op in ground_ops:
-        if isinstance(op, _GroundNSRT) or isinstance(op,
-                                                     _GroundSTRIPSOperator):
+        if isinstance(op, (_GroundNSRT, _GroundSTRIPSOperator)):
             applicable = op.preconditions.issubset(atoms)
         elif isinstance(op, _GroundEndogenousProcess):
             applicable = op.condition_at_start.issubset(atoms)
@@ -4026,7 +3968,7 @@ def create_video_from_partial_refinements(
         logging.debug("reset env for create video")
         state = env.reset(train_or_test, task_idx)
         # logging.debug(f"{pformat(state.pretty_str())}")
-        for i in range(max_num_steps):
+        for _i in range(max_num_steps):
             # logging.debug(f"state: {state.pretty_str()}")
             try:
                 act = policy(state)
@@ -4213,12 +4155,10 @@ def get_config_path_str(experiment_id: Optional[str] = None) -> str:
     if experiment_id is None:
         experiment_id = CFG.experiment_id
     if CFG.use_counterfactual_dataset_path_name:
-        return (f"{CFG.env}__{CFG.seed}__{CFG.experiment_id}__query")
-    else:
-        return (
-            f"{CFG.env}__{CFG.approach}__{CFG.seed}__"
-            f"{CFG.excluded_predicates}__{CFG.included_options}__{experiment_id}"
-        )
+        return f"{CFG.env}__{CFG.seed}__{CFG.experiment_id}__query"
+    return (f"{CFG.env}__{CFG.approach}__{CFG.seed}__"
+            f"{CFG.excluded_predicates}__"
+            f"{CFG.included_options}__{experiment_id}")
 
 
 def get_approach_save_path_str() -> str:
@@ -4295,10 +4235,14 @@ def string_to_python_object(value: str) -> Any:
 def flush_cache() -> None:
     """Clear all lru caches."""
     gc.collect()
-    wrappers = [
-        a for a in gc.get_objects()
-        if isinstance(a, functools._lru_cache_wrapper)  # pylint: disable=protected-access
-    ]
+    _lru_type = functools._lru_cache_wrapper  # pylint: disable=protected-access
+    wrappers = []
+    for a in gc.get_objects():
+        try:
+            if isinstance(a, _lru_type):
+                wrappers.append(a)
+        except Exception:  # pylint: disable=broad-except
+            continue
 
     for wrapper in wrappers:
         wrapper.cache_clear()
@@ -4359,6 +4303,7 @@ def null_sampler(state: State, goal: Set[GroundAtom], rng: np.random.Generator,
 
 
 class ConstantDelay(DelayDistribution):
+    """ConstantDelay class."""
 
     def __init__(self, delay: Union[int, float, torch.Tensor]):
         # keep dtype consistent with the rest of the model
@@ -4530,9 +4475,8 @@ class DiscreteGaussianDelay(DelayDistribution):
     def sample(self, sample_mode: bool = True) -> int:
         if sample_mode:
             return int(self.mu.item())
-        else:
-            u = torch.rand(1).item()
-            return int(torch.searchsorted(self._cdf, torch.tensor(u)))
+        u = torch.rand(1).item()
+        return int(torch.searchsorted(self._cdf, torch.tensor(u)))
 
     @cached_property
     def _str(self) -> str:
@@ -4885,6 +4829,7 @@ def get_object_by_name(objects: Collection[Object],
 
 
 def configure_logging() -> None:
+    """Configure logging with colored output."""
     # Create a single formatter instance to be reused
     colored_formatter = colorlog.ColoredFormatter(
         '%(log_color)s%(levelname)s: %(message)s',
@@ -4955,8 +4900,11 @@ def add_label_to_video(video: Video,
     new_video: Video = []
     for i, img in enumerate(video):
         img_name = prefix + f"frame_{i+1}"
-        labeled_img = add_label_to_image(img, img_name, imgs_dir,
-                                         save=save)  # type: ignore[arg-type]
+        labeled_img = add_label_to_image(
+            img,  # type: ignore[arg-type]
+            img_name,
+            imgs_dir,
+            save=save)
         new_video.append(labeled_img)  # type: ignore[arg-type]
     return new_video
 
@@ -4969,8 +4917,8 @@ def add_label_to_image(img: PIL.Image.Image,
     """Add a label to an image and potentially save."""
     img_copy = img.copy()
     draw = ImageDraw.Draw(img_copy)
-    font = ImageFont.load_default().font_variant(
-        size=50)  # type: ignore[union-attr]
+    font = ImageFont.load_default().font_variant(  # type: ignore[union-attr]
+        size=50)
 
     # Get text dimensions
     bbox = draw.textbbox((0, 0), s_name, font=font)
@@ -5020,9 +4968,8 @@ def all_subsets(input_set: Iterable[Any]) -> Iterator[Set[Any]]:
 
 
 def add_in_auxiliary_predicates(predicates: Set[Predicate]) -> Set[Predicate]:
-    # If a predicate is a drived predicate, check its auxiliary predicates
-    # attribute, and add them and all their derived predicates to the set
-    # recursively.
+    """Add auxiliary predicates from derived predicates."""
+
     def add_auxiliary(pred: Predicate, preds: Set[Predicate]) -> None:
         if isinstance(pred, DerivedPredicate):
             if pred.auxiliary_predicates:
@@ -5052,7 +4999,9 @@ def get_derived_predicates(
 #     for p in derived_preds:
 #         for aux in getattr(p, "auxiliary_predicates", []):
 #             # only count deps on other derived preds
-#             q = next((dp for dp in derived_preds if dp.name == aux.name), None)
+#             q = next(
+#                 (dp for dp in derived_preds
+#                  if dp.name == aux.name), None)
 #             if q:
 #                 edges[q].add(p); indeg[p] += 1
 
@@ -5162,6 +5111,7 @@ def get_base_supporter_predicates(
 
 
 class PredicateEvaluationError(Exception):
+    """PredicateEvaluationError class."""
 
     def __init__(self, message: str, pred: Any) -> None:
         super().__init__(message)

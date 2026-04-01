@@ -54,14 +54,13 @@ class PyBulletBalanceGroundTruthOptionFactory(GroundTruthOptionFactory):
         plate_type = types["plate"]
         block_size = CFG.blocks_block_size
 
-        GripperOpen = predicates['GripperOpen']
         MachineOn = predicates['MachineOn']
 
         # Balanced = predicates['Balanced'].untransformed_predicate
 
         def get_current_fingers(state: State) -> float:
             robot, = state.get_objects(robot_type)
-            return PyBulletBalanceEnv._fingers_state_to_joint(
+            return PyBulletBalanceEnv._fingers_state_to_joint(  # pylint: disable=protected-access
                 pybullet_robot, state.get(robot, "fingers"))
 
         def open_fingers_func(state: State, objects: Sequence[Object],
@@ -207,7 +206,7 @@ class PyBulletBalanceGroundTruthOptionFactory(GroundTruthOptionFactory):
         def _TurnMachineOn_terminal(state: State, memory: Dict,
                                     objects: Sequence[Object],
                                     params: Array) -> bool:
-            del memory, params  # unused
+            del memory, objects, params  # unused
             machine = state.get_objects(machine_type)[0]
             robot = state.get_objects(robot_type)[0]
             # machine = objects[1]
@@ -307,7 +306,7 @@ class PyBulletBalanceGroundTruthOptionFactory(GroundTruthOptionFactory):
     @classmethod
     def _create_turn_machine_on_policy(cls) -> ParameterizedPolicy:
 
-        def policy(state: State, memory: Dict, objects: Sequence[Object],
+        def policy(state: State, memory: Dict, _objects: Sequence[Object],
                    params: Array) -> Action:
             # This policy moves the robot up to be level with the button in the
             # z direction and then moves forward in the y direction to press it.
@@ -320,15 +319,16 @@ class PyBulletBalanceGroundTruthOptionFactory(GroundTruthOptionFactory):
             z = state.get(robot, "z")
             robot_pos = (x, y, z)
             button_pos = (cls.env_cls.button_x, cls.env_cls.button_y,
-                          cls.env_cls.button_z + cls.env_cls._button_radius)
+                          cls.env_cls.button_z + cls.env_cls._button_radius)  # pylint: disable=protected-access
             # arr = np.r_[button_pos, 1.0].astype(np.float32)
             # # arr = np.clip(arr, cls.env_cls.action_space.low,
             # #               cls.env_cls.action_space.high)
             # return Action(arr)
+            btn_r = cls.env_cls._button_radius  # pylint: disable=protected-access
             if (cls.env_cls.button_x - x)**2 < \
-                    cls.env_cls._button_radius**2 and\
+                    btn_r**2 and\
                 (cls.env_cls.button_y - y)**2 < \
-                    cls.env_cls._button_radius**2:
+                    btn_r**2:
                 # Move directly toward the button.
                 return cls._get_move_action(state,
                                             button_pos,
@@ -354,7 +354,7 @@ class PyBulletBalanceGroundTruthOptionFactory(GroundTruthOptionFactory):
         assert isinstance(state, utils.PyBulletState)
         robots = [r for r in state if r.type.name == "robot"]
         assert len(robots) == 1
-        robot = robots[0]
+        _ = robots[0]
         current_joint_positions = state.joint_positions
         pybullet_robot = _get_pybullet_robot()
 
@@ -366,7 +366,7 @@ class PyBulletBalanceGroundTruthOptionFactory(GroundTruthOptionFactory):
             #              pybullet_robot.action_space.high)
             try:
                 assert pybullet_robot.action_space.contains(action_arr)
-            except:
+            except Exception:  # pylint: disable=broad-except
                 logging.debug(f"action_space: {pybullet_robot.action_space}\n")
                 logging.debug(f"action arr type: {type(action_arr)}")
                 logging.debug(f"action arr: {action_arr}")

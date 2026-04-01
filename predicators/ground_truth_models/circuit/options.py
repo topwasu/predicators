@@ -1,27 +1,22 @@
 """Ground-truth options for the coffee environment."""
 
-import logging
 from functools import lru_cache
 from typing import Callable, ClassVar, Dict, List, Sequence, Set, Tuple
 from typing import Type as TypingType
 
-import numpy as np
 import pybullet as p
 from gym.spaces import Box
 
 from predicators import utils
 from predicators.envs.pybullet_circuit import PyBulletCircuitEnv
-from predicators.envs.pybullet_env import PyBulletEnv
 from predicators.ground_truth_models import GroundTruthOptionFactory
-from predicators.ground_truth_models.coffee.options import \
-    PyBulletCoffeeGroundTruthOptionFactory
 from predicators.pybullet_helpers.controllers import \
     create_change_fingers_option, create_move_end_effector_to_pose_option
 from predicators.pybullet_helpers.geometry import Pose
 from predicators.pybullet_helpers.robots import SingleArmPyBulletRobot
 from predicators.settings import CFG
-from predicators.structs import Action, Array, Object, ParameterizedOption, \
-    ParameterizedPolicy, Predicate, State, Type
+from predicators.structs import Array, Object, ParameterizedOption, \
+    Predicate, State, Type
 
 
 @lru_cache
@@ -64,7 +59,7 @@ class PyBulletCircuitGroundTruthOptionFactory(GroundTruthOptionFactory):
 
         def get_current_fingers(state: State) -> float:
             robot, = state.get_objects(robot_type)
-            return PyBulletCircuitEnv._fingers_state_to_joint(
+            return PyBulletCircuitEnv._fingers_state_to_joint(  # pylint: disable=protected-access
                 pybullet_robot, state.get(robot, "fingers"))
 
         def open_fingers_func(state: State, objects: Sequence[Object],
@@ -281,7 +276,8 @@ class PyBulletCircuitGroundTruthOptionFactory(GroundTruthOptionFactory):
                 [0, cls.env_cls.robot_init_tilt, 0])
             # np.arctan2(by - ly, bx - lx)])
             target_pose = Pose(target_pos, target_orn)
-            # logging.debug(f"Current pos:{current_position}, \ntarget pos:{target_pos}\n")
+            # logging.debug(f"Current pos:{current_position},
+            # \ntarget pos:{target_pos}\n")
             return current_pose, target_pose, finger_status
 
         return create_move_end_effector_to_pose_option(

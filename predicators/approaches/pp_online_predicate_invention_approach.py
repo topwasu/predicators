@@ -1,3 +1,4 @@
+"""pp_online_predicate_invention_approach module."""
 import logging
 import os
 import re
@@ -10,7 +11,6 @@ from typing import Any, Dict, FrozenSet, Iterator, List, Optional, Sequence, \
 
 import dill as pkl
 import PIL
-import wandb
 from gym.spaces import Box
 from PIL import ImageDraw, ImageFont
 
@@ -31,9 +31,9 @@ from predicators.predicate_search_score_functions import \
     _ExpectedNodesScoreFunction
 from predicators.settings import CFG
 from predicators.structs import CausalProcess, Dataset, DerivedPredicate, \
-    EndogenousProcess, ExogenousProcess, GroundAtom, GroundAtomTrajectory, \
-    Image, InteractionResult, LowLevelTrajectory, ParameterizedOption, \
-    Predicate, Segment, State, Task, Type, _GroundExogenousProcess
+    EndogenousProcess, ExogenousProcess, GroundAtomTrajectory, Image, \
+    InteractionResult, LowLevelTrajectory, ParameterizedOption, Predicate, \
+    Segment, State, Task, Type, _GroundExogenousProcess
 
 
 class OnlinePredicateInventionProcessPlanningApproach(
@@ -95,7 +95,7 @@ class OnlinePredicateInventionProcessPlanningApproach(
         all_trajs = self._offline_dataset.trajectories + \
             self._online_dataset.trajectories
 
-        # TODO: change to only propose when stop improving?
+        # Future: change to only propose when stop improving?
         # Test to only generate proposals at cycle 0.
         if self._online_learning_cycle == 0:
             proposed_predicates = self._get_predicate_proposals(
@@ -106,7 +106,7 @@ class OnlinePredicateInventionProcessPlanningApproach(
 
         # --- Select the predicates to keep ---
         self._select_predicates_and_learn_processes(
-            ite=self._online_learning_cycle,
+            _ite=self._online_learning_cycle,
             all_trajs=all_trajs,
             proposed_predicates=proposed_predicates,
             train_tasks=self._train_tasks)
@@ -120,6 +120,7 @@ class OnlinePredicateInventionProcessPlanningApproach(
         self._online_learning_cycle += 1
 
     def save(self, online_learning_cycle: Optional[int] = None) -> None:
+        """Save."""
         # Saving the learned processes, dataset, candidate predicates
         save_path = utils.get_approach_save_path_str()
         with open(f"{save_path}_{online_learning_cycle}.PROCes", "wb") as f:
@@ -153,7 +154,7 @@ class OnlinePredicateInventionProcessPlanningApproach(
         self._offline_dataset = save_dict["offline_dataset"]
         self._online_dataset = save_dict["online_dataset"]
         self._online_learning_cycle = save_dict["online_learning_cycle"] + 1
-        logging.info(f"\n\nLoaded Processes:")
+        logging.info("\n\nLoaded Processes:")
         for process in sorted(self._processes):
             logging.info(process)
         logging.info(
@@ -168,7 +169,6 @@ class OnlinePredicateInventionProcessPlanningApproach(
         for proc in self._processes:
             if isinstance(proc, EndogenousProcess):
                 proc.option.params_space.seed(CFG.seed)
-        pass
 
     def _get_predicate_proposals(
             self, proposal_method: str,
@@ -191,7 +191,7 @@ class OnlinePredicateInventionProcessPlanningApproach(
                     proposal_method, trajectories, i,
                     invent_derived_predicates=\
                         CFG.predicate_invent_invent_derived_predicates)
-            # TODO: filter semantically equivalent predicate by evaluation
+            # Future: filter semantically equivalent predicates
         return base_candidates
 
     def _get_predicate_proposals_from_fm(
@@ -225,14 +225,13 @@ class OnlinePredicateInventionProcessPlanningApproach(
             else:
                 prompt_template_f = f"prompts/invent_{proposal_method}_failed"\
                                     f".outline"
-            with open(prompt_template_f, "r") as f:
+            with open(prompt_template_f, "r", encoding='utf-8') as f:
                 prompt_template = f.read()
 
             # 2. Fill and save the template
             pred_str = _get_predicates_str(self._get_current_predicates())
             types = set(o.type for o in set(trajectories[0].states[0]))
-            logging.info(
-                f"Inventing predicates from only the offline dataset.")
+            logging.info("Inventing predicates from only the offline dataset.")
             experience_str, state_str = _get_transition_str(
                 self._offline_dataset.trajectories,  # +\
                 # self._online_dataset.trajectories,
@@ -248,7 +247,9 @@ class OnlinePredicateInventionProcessPlanningApproach(
                 GOAL_PREDICATE=self._train_tasks[0].goal)
             with open(
                     f"{CFG.log_file}/ite{self._online_learning_cycle}_b{b_id}"
-                    f"_s1.prompt", "w") as f:
+                    f"_s1.prompt",
+                    "w",
+                    encoding='utf-8') as f:
                 f.write(prompt)
 
             # 3. Get spec proposals
@@ -257,12 +258,13 @@ class OnlinePredicateInventionProcessPlanningApproach(
                 images = load_images_from_directory(
                     CFG.log_file +
                     f"ite{self._online_learning_cycle}_b{b_id}_obs/")
-                spec_response = self._vlm.sample_completions(  # type: ignore[union-attr]
-                    prompt,
-                    images,
-                    temperature=temperature,
-                    num_completions=1,
-                    seed=seed)[0]
+                vlm = self._vlm
+                assert vlm is not None
+                spec_response = vlm.sample_completions(prompt,
+                                                       images,
+                                                       temperature=temperature,
+                                                       num_completions=1,
+                                                       seed=seed)[0]
             else:
                 spec_response = self._llm.sample_completions(
                     prompt,
@@ -272,14 +274,17 @@ class OnlinePredicateInventionProcessPlanningApproach(
                     seed=seed)[0]
             with open(
                     f"{CFG.log_file}/ite{self._online_learning_cycle}_b{b_id}"
-                    f"_s1.response", "w") as f:
+                    f"_s1.response",
+                    "w",
+                    encoding='utf-8') as f:
                 f.write(spec_response)
         elif proposal_method == "discrimination":
-            # Method 1: Find each state, if it satisfies the condition of an
-            #   exogenous process, check later that its effect did take place, save
-            #   it if not.
-            #   Then for each exogenous process, compare the above negative state
-            #   with positive states where the effect took place (e.g. in the demo).
+            # Method 1: Find each state, if it satisfies the
+            #   condition of an exogenous process, check later
+            #   that its effect did take place, save it if not.
+            #   Then for each exogenous process, compare the
+            #   above negative state with positive states where
+            #   the effect took place (e.g. in the demo).
             # Maybe this will mirror the planner.
             # Remember to reset at the end
 
@@ -290,17 +295,18 @@ class OnlinePredicateInventionProcessPlanningApproach(
                 self._get_current_predicates(), exogenous_processes)
 
             # Step 2: Find the true positive examples
-            # For each expected effect that did not take place, find in the demo
-            #  the initial state where it did take place, and save it as a positive
+            # For each expected effect that did not take place,
+            # find in the demo the initial state where it did
+            # take place, and save it as a positive
             #  example.
-            true_positive_process_state = get_true_positive_process_states(
+            get_true_positive_process_states(
                 self._get_current_predicates(), exogenous_processes,
                 list(false_positive_process_state.keys()),
                 self._offline_dataset.trajectories)
 
             # Step 3: Prompt VLM to invent predicates
-            # TODO: prepare the prompt
-            # TODO: implement the prompt and parse logic
+            # Pending: prepare the prompt
+            # Pending: implement the prompt and parse logic
         else:
             raise NotImplementedError
 
@@ -308,16 +314,16 @@ class OnlinePredicateInventionProcessPlanningApproach(
         # Create the implementation prompt
         if CFG.predicate_invent_neural_symbolic_predicates:
             raise NotImplementedError
-        else:
-            template_f = "prompts/invent_sym_pred_implementation.outline"
-            state_api_f = "prompts/api_oo_state.py"
-            pred_api_f = "prompts/api_sym_predicate.py"
+        template_f = \
+            "prompts/invent_sym_pred_implementation.outline"
+        state_api_f = "prompts/api_oo_state.py"
+        pred_api_f = "prompts/api_sym_predicate.py"
 
-        with open(f"./{template_f}", "r") as f:
+        with open(f"./{template_f}", "r", encoding='utf-8') as f:
             template = f.read()
-        with open(f"./{state_api_f}", "r") as f:
+        with open(f"./{state_api_f}", "r", encoding='utf-8') as f:
             state_cls_str = f.read()
-        with open(f"./{pred_api_f}", "r") as f:
+        with open(f"./{pred_api_f}", "r", encoding='utf-8') as f:
             pred_cls_str = f.read()
 
         prompt = template.format(
@@ -331,7 +337,9 @@ class OnlinePredicateInventionProcessPlanningApproach(
         )
         with open(
                 f"{CFG.log_file}/ite{self._online_learning_cycle}_b{b_id}"
-                f"_s2_impl.prompt", "w") as f:
+                f"_s2_impl.prompt",
+                "w",
+                encoding='utf-8') as f:
             f.write(prompt)
 
         impl_response = self._llm.sample_completions(prompt,
@@ -341,7 +349,9 @@ class OnlinePredicateInventionProcessPlanningApproach(
                                                      seed=seed)[0]
         with open(
                 f"{CFG.log_file}/ite{self._online_learning_cycle}_b{b_id}"
-                f"_s2_impl.response", "w") as f:
+                f"_s2_impl.response",
+                "w",
+                encoding='utf-8') as f:
             f.write(impl_response)
 
         prim_predicates, deri_predicates =\
@@ -356,12 +366,14 @@ class OnlinePredicateInventionProcessPlanningApproach(
 
     def _select_predicates_and_learn_processes(
         self,
-        ite: int,
+        _ite: int,
         all_trajs: List[LowLevelTrajectory],
         proposed_predicates: Set[Predicate],
-        train_tasks: List[Task] = [],
+        train_tasks: Optional[List[Task]] = None,
         enumerate_processes: bool = False,
     ) -> None:
+        if train_tasks is None:
+            train_tasks = []
         if CFG.vlm_predicator_oracle_learned_predicates:
             if CFG.boil_goal_simple_human_happy:
                 selected_preds = {
@@ -377,7 +389,7 @@ class OnlinePredicateInventionProcessPlanningApproach(
         else:
             self._candidate_predicates |= proposed_predicates
 
-            all_candidates: Dict[Predicate, int] = {
+            all_candidates: Dict[Predicate, float] = {
                 p: p.arity
                 for p in self._initial_predicates
             }
@@ -388,8 +400,8 @@ class OnlinePredicateInventionProcessPlanningApproach(
             else:
                 grammar = _GivenPredicateGrammar(self._candidate_predicates)
             all_candidates.update(
-                grammar.generate(max_num=CFG.grammar_search_max_predicates)
-            )  # type: ignore[arg-type]
+                grammar.generate(  # type: ignore[arg-type]
+                    max_num=CFG.grammar_search_max_predicates))
 
             atom_dataset: List[GroundAtomTrajectory] =\
                         utils.create_ground_atom_dataset(all_trajs,
@@ -397,12 +409,9 @@ class OnlinePredicateInventionProcessPlanningApproach(
 
             new_preds = set(all_candidates) - self._initial_predicates
             logging.info(f"Candidate predicates:\n{pformat(new_preds)}")
-            if CFG.use_wandb:
-                wandb.log({"candidate_predicates": pformat(new_preds)})
-
             self._learned_predicates = set(all_candidates)  # temp
-            # TODO: we need to save the top ranking conditions here so it can be
-            #       used later in predicate selection.
+            # Future: save the top ranking conditions here
+            # so they can be used later in predicate selection.
             self._learn_processes(
                 all_trajs, online_learning_cycle=self._online_learning_cycle)
 
@@ -420,7 +429,7 @@ class OnlinePredicateInventionProcessPlanningApproach(
                     self._select_processes_by_score_optimization(train_tasks,
                                                 self._processes, atom_dataset)
                 self._processes = selected_processes
-                # TODO: remove duplicate predicates
+                # Future: remove duplicate predicates
                 self._learned_predicates = self._get_predicates_in_processes(
                     self._processes, set(all_candidates))
             else:
@@ -428,12 +437,13 @@ class OnlinePredicateInventionProcessPlanningApproach(
                 logging.info("[Start] Predicate search.")
                 self._learned_predicates =\
                     self._select_predicates_by_score_optimization(
-                        train_tasks, all_candidates, self._processes,  # type: ignore[arg-type]
+                        train_tasks,
+                        all_candidates,  # type: ignore[arg-type]
+                        self._processes,
                         all_trajs, atom_dataset)
             logging.info("[Finished] Predicate search.")
             logging.info("Total search time "
                          f"{time.perf_counter() - start_time:.2f}s")
-            return None
 
     def _get_predicates_in_processes(
             self, processes: Set[CausalProcess],
@@ -484,7 +494,7 @@ class OnlinePredicateInventionProcessPlanningApproach(
         score_func = _ExpectedNodesScoreFunction(
             _initial_predicates=set(),
             _atom_dataset=[],
-            _candidates=dict(),
+            _candidates={},
             _train_tasks=train_tasks,
             _current_processes=set(),
             _use_processes=True,
@@ -504,8 +514,11 @@ class OnlinePredicateInventionProcessPlanningApproach(
                 candidate_exogenous_processes  # type: ignore[arg-type]
                 | endogenous_processes,
                 option_specs=[])
-            process_penalty = _ExpectedNodesScoreFunction._get_operator_penalty(
-                candidate_exogenous_processes)  # type: ignore[arg-type]
+            process_penalty = (
+                _ExpectedNodesScoreFunction  # pylint: disable=protected-access
+                ._get_operator_penalty(
+                    candidate_exogenous_processes  # type: ignore[arg-type]
+                ))
             return process_score + process_penalty
 
         # Set up the search.
@@ -582,7 +595,7 @@ class OnlinePredicateInventionProcessPlanningApproach(
         score_func = _ExpectedNodesScoreFunction(
             _initial_predicates=set(),
             _atom_dataset=[],
-            _candidates=dict(),
+            _candidates={},
             _train_tasks=train_tasks,
             _current_processes=set(),
             _use_processes=True,
@@ -685,8 +698,11 @@ class OnlinePredicateInventionProcessPlanningApproach(
                 remaining_exogenous_processes  # type: ignore[arg-type]
                 | endogenous_processes,
                 option_specs=[])
-            process_penalty = _ExpectedNodesScoreFunction._get_operator_penalty(
-                remaining_exogenous_processes)  # type: ignore[arg-type]
+            process_penalty = (
+                _ExpectedNodesScoreFunction  # pylint: disable=protected-access
+                ._get_operator_penalty(
+                    remaining_exogenous_processes  # type: ignore[arg-type]
+                ))
             final_score = process_score + process_penalty
             logging.debug(f"Candidate scores: {final_score:.4f}")
             return final_score
@@ -756,7 +772,8 @@ class OnlinePredicateInventionProcessPlanningApproach(
         # logging.info("\nFiltering out predicates that don't appear in "
         #              "preconditions...")
         # preds = kept_predicates | initial_predicates
-        # pruned_atom_data = utils.prune_ground_atom_dataset(atom_dataset, preds)
+        # pruned_atom_data = utils.prune_ground_atom_dataset(
+        #     atom_dataset, preds)
         # segmented_trajs = [
         #     segment_trajectory(ll_traj, set(preds), atom_seq=atom_seq)
         #     for (ll_traj, atom_seq) in pruned_atom_data
@@ -786,33 +803,6 @@ class OnlinePredicateInventionProcessPlanningApproach(
         self._processes = endogenous_processes |\
                             _get_best_compatible_exo_processes(kept_predicates)
 
-        # Log processes and predicates to wandb if enabled
-        if CFG.use_wandb:
-            # Log each process as a separate entry
-            for i, process in enumerate(self._processes):
-                wandb.log({
-                    f"process_{i}_cycle_{self._online_learning_cycle}":
-                    str(process),
-                    "online_learning_cycle":
-                    self._online_learning_cycle,
-                    "process_index":
-                    i,
-                    "process_type":
-                    type(process).__name__
-                })
-
-            # Log each predicate as a separate entry
-            for i, pred in enumerate(kept_predicates):
-                wandb.log({
-                    f"predicate_{i}_cycle_{self._online_learning_cycle}":
-                    str(pred),
-                    "online_learning_cycle":
-                    self._online_learning_cycle,
-                    "predicate_index":
-                    i,
-                    "predicate_name":
-                    pred.name,
-                })
         return set(kept_predicates)
 
 
@@ -820,6 +810,7 @@ def get_false_positive_states_from_seg_trajs(
     segmented_trajs: List[List[Segment]],
     exogenous_processes: List[ExogenousProcess],
 ) -> Dict[_GroundExogenousProcess, List[State]]:
+    """Get false positive states from seg trajs."""
 
     # Map from ground_exogenous_process to a list of init states where the
     # condition is satisfied.
@@ -854,10 +845,11 @@ def get_false_positive_states_from_seg_trajs(
 
             for i, segment in enumerate(segmented_traj):
                 satisfy_condition = condition.issubset(segment_init_atoms[i])
-                first_state_or_prev_state_doesnt_satisfy = i == 0 or \
-                    not condition.issubset(segment_init_atoms[i - 1])
+                prev_doesnt = (
+                    i == 0
+                    or not condition.issubset(segment_init_atoms[i - 1]))
 
-                if satisfy_condition and first_state_or_prev_state_doesnt_satisfy:
+                if satisfy_condition and prev_doesnt:
                     false_positive_process_state[
                         g_exo_process].append(  # type: ignore[index]
                             # segment.trajectory.states[0])
@@ -868,10 +860,11 @@ def get_false_positive_states_from_seg_trajs(
                         and delete_effects.issubset(segment.delete_effects)):
                     if false_positive_process_state[
                             g_exo_process]:  # type: ignore[index]
-                        # TODO: we don't really know which one to remove, pop
-                        # the first one is a bias.
-                        false_positive_process_state[g_exo_process].pop(
-                            0)  # type: ignore[index]
+                        # Note: we don't really know which one
+                        # to remove; popping first is a bias.
+                        fp_list = false_positive_process_state[
+                            g_exo_process]  # type: ignore[index]
+                        fp_list.pop(0)
     return false_positive_process_state
 
 
@@ -889,13 +882,15 @@ def get_false_positive_states(
             process is activated in the trajectory.
     """
     initial_segmenter_method = CFG.segmenter
-    # TODO: use option_changes allows for creating a segment for the noop option
-    # in the end, but would cause problem if the start and end of option
-    # execution doesn't satisfy the condition but somewhere in the middle does
-    # it. The same problem exists for the effects.
+    # Note: option_changes creates a segment for the noop
+    # option at the end, but would cause problems if the
+    # start/end of option execution doesn't satisfy the
+    # condition but somewhere in the middle does. The same
+    # problem exists for the effects.
     #
-    # The fix for the atom_changes segmenter would be to create a segment in
-    # the end if there is still sttes after the last atom change.
+    # The fix for the atom_changes segmenter would be to
+    # create a segment at the end if there are still states
+    # after the last atom change.
     CFG.segmenter = "atom_changes"
     segmented_trajs = [
         segment_trajectory(traj, predicates, verbose=False)
@@ -961,7 +956,7 @@ def _get_predicates_str(predicates: Set[Predicate],
 
 
 def _get_types_str(types: Set[Type],
-                   include_features: bool = True,
+                   _include_features: bool = True,
                    use_python_def_str: bool = False) -> str:
     """Get the types string."""
     excluded_types = []
@@ -993,7 +988,7 @@ def _get_transition_str(
     """Get the state before and after some actions.
 
     Prioritize successful trajectories.
-    TODO: save images of the states.
+    Future: save images of the states.
     """
     if CFG.rgb_observation:
         obs_dir = CFG.log_file + f"ite{ite}_obs/"
@@ -1041,9 +1036,10 @@ def _get_transition_str(
             str_for_this_state.append(f"{state_str}")
             state_str_set.append("\n".join(str_for_this_state))
             if CFG.rgb_observation:
+                assert state.labeled_image is not None
                 save_image_with_label(
-                    state.labeled_image.copy(),
-                    obs_name,  # type: ignore[union-attr]
+                    state.labeled_image.copy(),  # type: ignore[arg-type]
+                    obs_name,
                     obs_dir)
 
             # Append action
@@ -1061,6 +1057,9 @@ def _get_transition_str(
             result_str.append(f"\nThis action results in {obs_name} "
                               "with additional info:")
         # Append final state
+        if not seg_traj:
+            continue
+        segment = seg_traj[-1]
         state = segment.states[-1]
         if use_abstract_state_str:
             state_str = sorted(utils.abstract(state, predicates))
@@ -1074,8 +1073,8 @@ def _get_transition_str(
         state_str_set.append("\n".join(str_for_this_state))
         if CFG.rgb_observation:
             save_image_with_label(
-                state.labeled_image.copy(),
-                obs_name,  # type: ignore[attr-defined]
+                state.labeled_image.copy(),  # type: ignore[attr-defined]
+                obs_name,
                 obs_dir)
 
     return "\n".join(result_str), "\n\n".join(state_str_set)
@@ -1085,20 +1084,22 @@ def save_image_with_label(img_copy: Image,
                           s_name: str,
                           obs_dir: str,
                           f_suffix: str = ".png") -> None:
-    draw = ImageDraw.Draw(img_copy)
-    font = ImageFont.load_default().font_variant(
-        size=50)  # type: ignore[union-attr]
+    """Save image with label."""
+    draw = ImageDraw.Draw(img_copy)  # type: ignore[arg-type]
+    font = ImageFont.load_default()
+    font = font.font_variant(size=50)  # type: ignore[union-attr]
     text_color = (0, 0, 0)  # white
     draw.text((0, 0), s_name, fill=text_color, font=font)
-    img_copy.save(os.path.join(obs_dir, s_name +
-                               f_suffix))  # type: ignore[attr-defined]
+    img_copy.save(  # type: ignore[attr-defined]
+        os.path.join(obs_dir, s_name + f_suffix))
     logging.debug(f"Saved image {s_name}")
 
 
-def load_images_from_directory(dir: str) -> List[PIL.Image.Image]:
+def load_images_from_directory(directory: str) -> List[PIL.Image.Image]:
+    """Load images from directory."""
     images = []
-    for filename in os.listdir(dir):
-        file_path = os.path.join(dir, filename)
+    for filename in os.listdir(directory):
+        file_path = os.path.join(directory, filename)
         if filename.lower().endswith(('.png', '.jpg')):
             img = PIL.Image.open(file_path)
             images.append(img)
@@ -1108,13 +1109,15 @@ def load_images_from_directory(dir: str) -> List[PIL.Image.Image]:
 def traj_is_successful(traj: LowLevelTrajectory,
                        train_tasks: List[Task]) -> bool:
     """Check if the trajectory is successful for any of the train tasks."""
-    goal_atoms = train_tasks[traj._train_task_idx].goal  # type: ignore[index]
+    task_idx = traj._train_task_idx  # pylint: disable=protected-access
+    goal_atoms = train_tasks[task_idx].goal  # type: ignore[index]
     goal_predicates = {atom.predicate for atom in goal_atoms}
     abstract_state = utils.abstract(traj.states[-1], goal_predicates)
     return goal_atoms.issubset(abstract_state)
 
 
 def add_python_quote(text: str) -> str:
+    """Add python quote."""
     return f"```python\n{text}\n```"
 
 
@@ -1144,10 +1147,10 @@ def _parse_predicates_predictions(
     untranslated_derived_pred_str: List[str] = []
     # --- Existing predicates and their classifiers
     for p in initial_predicates:
-        context[f"_{p.name}_NSP_holds"] = p._classifier
+        context[f"_{p.name}_NSP_holds"] = (p._classifier)  # pylint: disable=protected-access
 
     for p in existing_derived_candidates:
-        context[f"_{p.name}_CP_holds"] = p._classifier
+        context[f"_{p.name}_CP_holds"] = (p._classifier)  # pylint: disable=protected-access
 
     for p in existing_primitive_candidates | existing_derived_candidates:
         context[f"{p.name}"] = p
@@ -1157,18 +1160,16 @@ def _parse_predicates_predictions(
         context[f"_{t.name}_type"] = t
 
     # --- Imports ---
-    exec(import_str, context)
+    exec(import_str, context)  # pylint: disable=exec-used
 
     # --- Interpret the Python blocks ---
     for code_str in python_blocks:
         # Extract name from code block
-        match = re.search(r'(\w+)\s*=\s*(NS)?Predicate',
-                          code_str)  # type: ignore[assignment]
-        if match is None:
-            logging.warning("No predicate name found in the code block"
-                            )  # type: ignore[unreachable]
+        name_match = re.search(r'(\w+)\s*=\s*(NS)?Predicate', code_str)
+        if name_match is None:
+            logging.warning("No predicate name found in the code block")
             continue
-        pred_name = match.group(1)
+        pred_name = name_match.group(1)
         logging.info(f"Found definition for predicate {pred_name}")
         vlm_invention_use_concept_predicates = False
         if vlm_invention_use_concept_predicates:
@@ -1198,7 +1199,7 @@ def _parse_predicates_predictions(
             # Instantiate the primitive predicates
             #   check if it's roughly runable, and add it to list if it is.
             try:
-                exec(code_str, context)
+                exec(code_str, context)  # pylint: disable=exec-used
                 logging.debug(f"Testing predicate {pred_name}")
                 # Check1: Make sure it uses types present in the environment
                 proposed_pred = context[pred_name]
@@ -1207,15 +1208,15 @@ def _parse_predicates_predictions(
                         logging.warning(f"Type {t} not in the environment")
                         raise Exception(f"Type {t} not in the environment")
                 utils.abstract(example_state, [context[pred_name]])
-            except Exception as e:
+            except Exception as e:  # pylint: disable=broad-except
                 error_trace = traceback.format_exc()
                 logging.warning(f"Test failed: {e}\n{error_trace}")
                 continue
             else:
-                logging.debug(f"Test passed!")
+                logging.debug("Test passed!")
                 primitive_preds.add(context[pred_name])
 
-    # TODO: --- Convert the derived predicates to DerivedPredicate ---
+    # Future: convert derived predicates to DerivedPredicate
     derived_predicates: Set[DerivedPredicate] = set()
 
     return primitive_preds, derived_predicates  # type: ignore[return-value]

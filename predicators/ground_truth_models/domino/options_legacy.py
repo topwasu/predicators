@@ -2,7 +2,9 @@
 
 import logging
 from functools import lru_cache
-from typing import Callable, Dict, List, Sequence, Set, Tuple, cast
+from typing import Callable, ClassVar, Dict, List, Sequence, Set, Tuple
+from typing import Type as TypingType
+from typing import cast
 
 import numpy as np
 import pybullet as p
@@ -30,6 +32,15 @@ def _get_pybullet_robot() -> SingleArmPyBulletRobot:
 
 
 class _DominoLegacyOptionsMixin:
+    # Declare attributes provided by the concrete class that uses this mixin.
+    env_cls: ClassVar[TypingType[PyBulletDominoEnv]]
+    _move_to_pose_tol: ClassVar[float]
+    _finger_action_nudge_magnitude: ClassVar[float]
+    _transport_z: ClassVar[float]
+    _transport_z_push: ClassVar[float]
+    _offset_x: ClassVar[float]
+    _offset_z: ClassVar[float]
+    _place_drop_z: ClassVar[float]
     """Legacy option implementations, mixed into the main factory class."""
 
     @classmethod
@@ -50,7 +61,7 @@ class _DominoLegacyOptionsMixin:
 
         def get_current_fingers(state: State) -> float:
             robot, = state.get_objects(robot_type)
-            return PyBulletDominoEnv._fingers_state_to_joint(
+            return PyBulletDominoEnv._fingers_state_to_joint(  # pylint: disable=protected-access
                 pybullet_robot, state.get(robot, "fingers"))
 
         def open_fingers_func(state: State, objects: Sequence[Object],
@@ -70,7 +81,8 @@ class _DominoLegacyOptionsMixin:
         options: Set[ParameterizedOption] = set()
 
         if CFG.domino_restricted_push:
-            # PushRestricted - like Push but takes only robot (finds start block from state)
+            # PushRestricted - like Push but takes only robot (finds start block
+            # from state)
             restricted_option_type = [robot_type]
             restricted_params_space = Box(0, 1, (0, ))
             PushRestricted = utils.LinearChainParameterizedOption(
@@ -170,7 +182,7 @@ class _DominoLegacyOptionsMixin:
         def _Pick_terminal(state: State, memory: Dict,
                            objects: Sequence[Object], params: Array) -> bool:
             del memory, params  # unused
-            robot, domino = objects
+            robot, _domino = objects
             return state.get(robot, "fingers") < PyBulletEnv.grasp_tol
 
         Pick = utils.LinearChainParameterizedOption("Pick", [
@@ -201,7 +213,8 @@ class _DominoLegacyOptionsMixin:
         ])
         options.add(Pick)
 
-        # Choose between discrete (Place) or continuous (PlaceContinuous) based on CFG
+        # Choose between discrete (Place) or continuous (PlaceContinuous) based
+        # on CFG
         if CFG.domino_use_continuous_place:
             # PlaceContinuous - continuous parameters version
             place_continuous_option_types = [robot_type]
@@ -282,7 +295,8 @@ class _DominoLegacyOptionsMixin:
                 joint_positions = state.joint_positions.copy()
                 finger_position = joint_positions[
                     pybullet_robot.left_finger_joint_idx]
-                # The finger action is an absolute joint position for the fingers.
+                # The finger action is an absolute joint position for the
+                # fingers.
                 f_action = finger_position + finger_delta
                 # Override the meaningless finger values in joint_action.
                 joint_positions[
@@ -354,7 +368,7 @@ class _DominoLegacyOptionsMixin:
     def _find_start_block(cls, state: State, domino_type: Type) -> Object:
         """Find the start block domino using the InitialBlock classifier."""
         for domino in state.get_objects(domino_type):
-            if DominoComponent._StartBlock_holds(state, [domino]):
+            if DominoComponent._StartBlock_holds(state, [domino]):  # pylint: disable=protected-access
                 return domino
         raise ValueError("No start block found in state")
 
@@ -466,7 +480,8 @@ class _DominoLegacyOptionsMixin:
             # Use domino1's current z for reference
             dz = state.get(domino_f, "z")
 
-            # Compute dir_value based on rotation of domino2 and the rotation object
+            # Compute dir_value based on rotation of domino2
+            # and the rotation object
             # target_angle = state.get(rotation, "angle")  # degrees
             target_angle = float(
                 rotation.name.split("_")[-1])  # extract angle from name
@@ -520,7 +535,7 @@ class _DominoLegacyOptionsMixin:
                     # The target domino will be turned by 45 degrees.
                     target_rot = rot2 - turn_dir * np.pi / 4
 
-                    # First, calculate the position on the grid, one step forward.
+                    # Calculate position on grid, one step forward.
                     # grid_x = x2 + gap * np.sin(rot2)
                     # grid_y = y2 + gap * np.cos(rot2)
                     # grid_x = state.get(tgt_pos, "xx")
@@ -530,8 +545,10 @@ class _DominoLegacyOptionsMixin:
                     grid_y = float(
                         tgt_pos.name.split("_")[2])  # extract y from
 
-                    # Then, apply the diagonal shift from the generator for stability.
-                    shift_magnitude = cls.env_cls.domino_width * DominoComponent.turn_shift_frac
+                    # Then, apply the diagonal shift from the generator for
+                    # stability.
+                    shift_magnitude = (cls.env_cls.domino_width *
+                                       DominoComponent.turn_shift_frac)
                     shift_dx = shift_magnitude * (turn_dir * np.cos(rot2) -
                                                   np.sin(rot2))
                     shift_dy = shift_magnitude * (-turn_dir * np.sin(rot2) -
@@ -545,8 +562,10 @@ class _DominoLegacyOptionsMixin:
                     # The target domino completes the 90-degree turn.
                     target_rot = rot2 - turn_dir * np.pi / 4
 
-                    # Calculate position relative to domino2 using the generator's formula.
-                    shift_magnitude = cls.env_cls.domino_width * DominoComponent.turn_shift_frac
+                    # Calculate position relative to domino2 using the
+                    # generator's formula.
+                    shift_magnitude = (cls.env_cls.domino_width *
+                                       DominoComponent.turn_shift_frac)
                     sin_rot2 = np.sin(rot2)
                     cos_rot2 = np.cos(rot2)
 
@@ -566,7 +585,8 @@ class _DominoLegacyOptionsMixin:
                         f"Unexpected domino rotation {rot2} in place option. "
                         "Defaulting to cardinal turn logic.")
                     # raise ValueError(
-                    #     f"Unexpected domino rotation {rot2} in place option. ")
+                    #     f"Unexpected domino rotation "
+                    #     f"{rot2} in place option. ")
                     # The target domino will be turned by 45 degrees.
                     target_rot = rot2 - turn_dir * np.pi / 4
                     # grid_x = state.get(tgt_pos, "xx")
@@ -575,7 +595,8 @@ class _DominoLegacyOptionsMixin:
                         tgt_pos.name.split("_")[1])  # extract x from name
                     grid_y = float(
                         tgt_pos.name.split("_")[2])  # extract y from
-                    shift_magnitude = cls.env_cls.domino_width * DominoComponent.turn_shift_frac
+                    shift_magnitude = (cls.env_cls.domino_width *
+                                       DominoComponent.turn_shift_frac)
                     shift_dx = shift_magnitude * (turn_dir * np.cos(rot2) -
                                                   np.sin(rot2))
                     shift_dy = shift_magnitude * (-turn_dir * np.sin(rot2) -

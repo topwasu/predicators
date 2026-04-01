@@ -47,10 +47,9 @@ class PyBulletGrowGroundTruthOptionFactory(_GrowLegacyOptionsMixin,
 
     @classmethod
     def _get_options_skill_factories(
-            cls, env_name: str, types: Dict[str,
-                                            Type], predicates: Dict[str,
-                                                                    Predicate],
-            action_space: Box) -> Set[ParameterizedOption]:
+            cls, _env_name: str, types: Dict[str, Type],
+            predicates: Dict[str, Predicate],
+            _action_space: Box) -> Set[ParameterizedOption]:
         """Skill-factory-based option implementations for the grow env.
 
         PickJug and Place use the PhaseSkill framework.  Pour falls back
@@ -58,6 +57,7 @@ class PyBulletGrowGroundTruthOptionFactory(_GrowLegacyOptionsMixin,
         tilting that doesn't map directly to MOVE_TO_POSE /
         CHANGE_FINGERS phases.
         """
+        del predicates  # unused in skill factory implementation
 
         _, pybullet_robot, _ = \
             PyBulletGrowEnv.initialize_pybullet(using_gui=False)
@@ -74,7 +74,7 @@ class PyBulletGrowGroundTruthOptionFactory(_GrowLegacyOptionsMixin,
             robot=pybullet_robot,
             open_fingers_joint=pybullet_robot.open_fingers,
             closed_fingers_joint=pybullet_robot.closed_fingers,
-            fingers_state_to_joint=PyBulletGrowEnv._fingers_state_to_joint,
+            fingers_state_to_joint=PyBulletGrowEnv._fingers_state_to_joint,  # pylint: disable=protected-access
             robot_init_tilt=PyBulletGrowEnv.robot_init_tilt,
             robot_init_wrist=PyBulletGrowEnv.robot_init_wrist,
             transport_z=env_cls.z_ub - 0.35,
@@ -96,7 +96,8 @@ class PyBulletGrowGroundTruthOptionFactory(_GrowLegacyOptionsMixin,
         ) -> Tuple[float, float, float, float]:
             del params, config
             _, jug = objects
-            hx, hy, hz = env_cls._get_jug_handle_grasp(state, jug)
+            hx, hy, hz = env_cls._get_jug_handle_grasp(  # type: ignore[attr-defined]  # pylint: disable=protected-access
+                state, jug)
             return (hx, hy, hz, state.get(jug, "rot"))
 
         PickJug = create_pick_skill(
@@ -118,9 +119,6 @@ class PyBulletGrowGroundTruthOptionFactory(_GrowLegacyOptionsMixin,
         # ---------------------------------------------------------------
         # Pour
         # ---------------------------------------------------------------
-        Holding = predicates["Holding"]
-        Grown = predicates["Grown"]
-        HandTilted = predicates["HandTilted"]
 
         def _get_cup_position(
             state: State,

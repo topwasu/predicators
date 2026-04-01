@@ -1,7 +1,8 @@
 """Legacy option implementations for the fan environment."""
 
 from functools import lru_cache
-from typing import Callable, Dict, List, Sequence, Set, Tuple
+from typing import Callable, ClassVar, Dict, List, Sequence, Set, Tuple
+from typing import Type as TypingType
 
 import numpy as np
 import pybullet as p
@@ -26,6 +27,12 @@ def _get_pybullet_robot() -> SingleArmPyBulletRobot:
 
 
 class _FanLegacyOptionsMixin:
+    # Declare attributes provided by the concrete class that uses this mixin.
+    env_cls: ClassVar[TypingType[PyBulletFanEnv]]
+    _move_to_pose_tol: ClassVar[float]
+    _finger_action_nudge_magnitude: ClassVar[float]
+    _hand_empty_move_z: ClassVar[float]
+    _y_offset: ClassVar[float]
     """Legacy option implementations, mixed into the main factory class."""
 
     @classmethod
@@ -45,11 +52,11 @@ class _FanLegacyOptionsMixin:
 
         def get_current_fingers(state: State) -> float:
             robot, = state.get_objects(robot_type)
-            return PyBulletFanEnv._fingers_state_to_joint(
+            return PyBulletFanEnv._fingers_state_to_joint(  # pylint: disable=protected-access
                 pybullet_robot, state.get(robot, "fingers"))
 
-        def open_fingers_func(state: State, objects: Sequence[Object],
-                              params: Array) -> Tuple[float, float]:
+        def _open_fingers_func(state: State, objects: Sequence[Object],
+                               params: Array) -> Tuple[float, float]:
             del objects, params  # unused
             current = get_current_fingers(state)
             target = pybullet_robot.open_fingers
@@ -146,9 +153,11 @@ class _FanLegacyOptionsMixin:
                         lambda y: y - cls._y_offset * push_factor, lambda z: z
                         + cls.env_cls.switch_height * push_above_factor,
                         "closed", option_type, params_space, switch_type),
-                    # cls._create_fan_move_to_push_switch_option(
-                    #     "MoveBack", lambda y: y + cls._y_offset * behind_factor,
-                    #     lambda _: cls._hand_empty_move_z, "closed", option_type,
+                    # cls._create_fan_move_to_push_switch_option(  # noqa
+                    #     "MoveBack",
+                    #     lambda y: y + cls._y_offset * behind_factor,
+                    #     lambda _: cls._hand_empty_move_z,
+                    #     "closed", option_type,
                     #     params_space, switch_type),
                 ])
             options.add(SwitchOn)
@@ -176,9 +185,11 @@ class _FanLegacyOptionsMixin:
                         lambda y: y + cls._y_offset * push_factor, lambda z: z
                         + cls.env_cls.switch_height * push_above_factor,
                         "closed", option_type, params_space, switch_type),
-                    # cls._create_fan_move_to_push_switch_option(
-                    #     "MoveBack", lambda y: y + cls._y_offset * behind_factor,
-                    #     lambda _: cls._hand_empty_move_z, "closed", option_type,
+                    # cls._create_fan_move_to_push_switch_option(  # noqa
+                    #     "MoveBack",
+                    #     lambda y: y + cls._y_offset * behind_factor,
+                    #     lambda _: cls._hand_empty_move_z,
+                    #     "closed", option_type,
                     #     params_space, switch_type),
                 ])
             options.add(SwitchOff)
@@ -209,7 +220,8 @@ class _FanLegacyOptionsMixin:
                 joint_positions = state.joint_positions.copy()
                 finger_position = joint_positions[
                     pybullet_robot.left_finger_joint_idx]
-                # The finger action is an absolute joint position for the fingers.
+                # The finger action is an absolute joint position for the
+                # fingers.
                 f_action = finger_position + finger_delta
                 # Override the meaningless finger values in joint_action.
                 joint_positions[

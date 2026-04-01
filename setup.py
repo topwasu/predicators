@@ -40,8 +40,11 @@ setup(
         "google-generativeai",
         "tenacity",
         "httpx==0.27.0",
-        "opencv-python>=4.5.0",
         "colorlog",
+        "psutil",
+        "claude-agent-sdk",
+        "nest_asyncio",
+        "mara_robosim@git+https://github.com/yichao-liang/mara-robosim.git",
     ],
     include_package_data=True,
     extras_require={

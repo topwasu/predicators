@@ -12,11 +12,10 @@ import time
 from collections import defaultdict
 from pprint import pformat
 from typing import Any, Dict, FrozenSet, Iterator, List, Optional, Set, \
-    Tuple, cast
+    Tuple, Union, cast
 
-import multiprocess as mp
-import psutil
-import wandb
+import multiprocess as mp  # type: ignore[import-untyped]
+import psutil  # type: ignore[import-untyped]
 from pathos.multiprocessing import ProcessingPool as Pool
 
 from predicators import utils
@@ -33,7 +32,7 @@ from predicators.structs import PNAD, CausalProcess, Datastore, \
 
 if sys.platform == "darwin":
     # Set this when using macOS, to avoid issues with forked processes.
-    mp.set_start_method("spawn", force=True)
+    mp.set_start_method("spawn", force=True)  # pylint: disable=no-member
 
 
 def _flat_pnad_scoring_worker(
@@ -49,7 +48,7 @@ def _flat_pnad_scoring_worker(
     scores_tuple, process).
     """
     (pnad_idx, condition_idx, base_process, condition_candidate, trajectories,
-     predicates, seed, num_it, complexity_weight, load_dir, save_dir,
+     predicates, seed, num_it, complexity_weight, _load_dir, _save_dir,
      early_stopping_patience) = args
 
     # Set the conditions on the process object.
@@ -61,7 +60,7 @@ def _flat_pnad_scoring_worker(
 
     # Local import avoids pickling issues with bound methods.
     from predicators.approaches.pp_param_learning_approach import \
-        learn_process_parameters
+        learn_process_parameters  # pylint: disable=import-outside-toplevel
 
     # Perform the expensive part: learning and scoring.
     process, scores = learn_process_parameters(
@@ -82,9 +81,16 @@ def _flat_pnad_scoring_worker(
     # Cost is negative log-likelihood plus penalty.
     cost = -scores[0] + complexity_penalty
 
-    # Return the identifier, condition index, cost, candidate, and the full scores tuple for logging.
-    return pnad_idx, condition_idx, cost, condition_candidate, scores, process[  # type: ignore[return-value]
-        0]
+    # Return the identifier, condition index, cost, candidate, and the full
+    # scores tuple for logging.
+    result_proc = process[0]  # type: ignore[index]
+    return (
+        pnad_idx,
+        condition_idx,
+        cost,
+        condition_candidate,
+        scores,  # type: ignore[return-value]
+        result_proc)
 
 
 class ClusteringSTRIPSLearner(BaseSTRIPSLearner):
@@ -240,19 +246,20 @@ class ClusterAndLLMSelectSTRIPSLearner(ClusteringSTRIPSLearner):
     Note: The current prompt are tailored for exogenous processes.
     """
 
-    def __init__(self, *args: List,
-                 **kwargs: Dict) -> None:  # type: ignore[type-arg]
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         """Initialize the LLM and load the prompt template."""
-        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        super().__init__(*args, **kwargs)
         self._llm = utils.create_llm_by_name(CFG.llm_model_name)
         prompt_file = utils.get_path_to_predicators_root() + \
             "/predicators/nsrt_learning/strips_learning/" + \
             "llm_op_learning_prompts/condition_selection.prompt"
-        with open(prompt_file, "r") as f:
+        with open(prompt_file, "r", encoding='utf-8') as f:
             self.base_prompt = f.read()
-        from predicators.approaches.pp_online_predicate_invention_approach import \
-            get_false_positive_states
-        self._get_false_positive_process_states = get_false_positive_states
+        # pylint: disable-next=import-outside-toplevel
+        from predicators.approaches import \
+            pp_online_predicate_invention_approach as pp_inv
+        self._get_false_positive_process_states = \
+            pp_inv.get_false_positive_states
 
     @classmethod
     def get_name(cls) -> str:
@@ -297,7 +304,7 @@ class ClusterAndLLMSelectSTRIPSLearner(ClusteringSTRIPSLearner):
         proposed_conditions: List[str] = []
         for i, pnad in enumerate(new_pnads):
             if seperate_llm_query_per_pnad:
-                effect_and_conditions += f"Process 0:\n"
+                effect_and_conditions += "Process 0:\n"
             else:
                 effect_and_conditions += f"Process {i}:\n"
             add_effects = pnad.op.add_effects
@@ -309,8 +316,8 @@ class ClusterAndLLMSelectSTRIPSLearner(ClusteringSTRIPSLearner):
             effect_and_conditions += ")\n"
             effect_and_conditions += "Delete effects: ("
             if delete_effects:
-                effect_and_conditions += "and " +  " ".join(f"({str(atom)})" \
-                                                        for atom in delete_effects)
+                del_str = " ".join(f"({str(atom)})" for atom in delete_effects)
+                effect_and_conditions += "and " + del_str
             effect_and_conditions += ")\n"
             segment_init_atoms = pnad.datastore[0][0].init_atoms
             segment_var_to_obj = pnad.datastore[0][1]
@@ -347,8 +354,8 @@ class ClusterAndLLMSelectSTRIPSLearner(ClusteringSTRIPSLearner):
                 atom_name = condition[0]
                 atom_variables = condition[1]
                 if atom.predicate.name == atom_name and \
-                        all([var_type[0] == var.name for (var_type, var) in
-                            zip(atom_variables, atom.variables)]):
+                        all(var_type[0] == var.name for (var_type, var) in
+                            zip(atom_variables, atom.variables)):
                     return True
             return False
 
@@ -367,15 +374,13 @@ class ClusterAndLLMSelectSTRIPSLearner(ClusteringSTRIPSLearner):
             segment_init_atoms = corresponding_pnad.datastore[0][0].init_atoms
             segment_var_to_obj = corresponding_pnad.datastore[0][1]
             obj_to_var = {v: k for k, v in segment_var_to_obj.items()}
-            conditions_to_choose_from = {  # type: ignore[assignment]
+            lifted_conditions_to_choose_from: Set[LiftedAtom] = {
                 a.lift(obj_to_var)
                 for a in segment_init_atoms
             }
-            new_conditions = set(
-                atom for atom in
-                conditions_to_choose_from  # type: ignore[union-attr]
-                if atom_in_llm_selection(atom,
-                                         conditions))  # type: ignore[arg-type]
+            new_conditions = set(atom
+                                 for atom in lifted_conditions_to_choose_from
+                                 if atom_in_llm_selection(atom, conditions))
             add_eff = corresponding_pnad.op.add_effects
             del_eff = corresponding_pnad.op.delete_effects
             # the variable might also just in the effects
@@ -423,7 +428,9 @@ class ClusterAndLLMSelectSTRIPSLearner(ClusteringSTRIPSLearner):
                 #         if len(states) > 0:
                 #             # initial_segmenter_method = CFG.segmenter
                 #             # CFG.segmenter = "atom_changes"
-                #             # segments = [segment_trajectory(traj, self._predicates) for traj in self._trajectories]
+                # # segments = [segment_trajectory(
+                # #     traj, self._predicates)
+                # #     for traj in self._trajectories]
                 #             # CFG.segmenter = initial_segmenter_method
         return final_pnads
 
@@ -465,18 +472,20 @@ class ClusterAndLLMSelectSTRIPSLearner(ClusteringSTRIPSLearner):
 
 
 class ClusteringProcessLearner(ClusteringSTRIPSLearner):
+    """ClusteringProcessLearner class."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.online_learning_cycle = kwargs.get("online_learning_cycle", None)
         self._endogenous_processes = kwargs["endogenous_processes"]
-        from predicators.approaches.pp_online_predicate_invention_approach import \
-            get_false_positive_states_from_seg_trajs
-        self._get_false_positive_states_from_seg_trajs = \
-            get_false_positive_states_from_seg_trajs
+        # pylint: disable-next=import-outside-toplevel
+        from predicators.approaches import \
+            pp_online_predicate_invention_approach as pp_inv2
+        self._get_false_positive_states_from_seg_trajs = (
+            pp_inv2.get_false_positive_states_from_seg_trajs)
 
         from predicators.approaches.pp_param_learning_approach import \
-            learn_process_parameters
+            learn_process_parameters  # pylint: disable=import-outside-toplevel
         self._get_data_likelihood_and_learn_params = \
             learn_process_parameters
 
@@ -492,7 +501,7 @@ class ClusteringProcessLearner(ClusteringSTRIPSLearner):
         segments = [seg for segs in self._segmented_trajs for seg in segs]
         # Cluster the segments according to common option and effects.
         pnads: List[PNAD] = []
-        for i, segment in enumerate(segments):
+        for segment in segments:
             if segment.has_option():
                 segment_option = segment.get_option()
                 segment_param_option = segment_option.parent
@@ -521,14 +530,19 @@ class ClusteringProcessLearner(ClusteringSTRIPSLearner):
                 if not isinstance(a.predicate, DerivedPredicate))
             if self.get_name() in ["cluster_and_search_process_learner"]:
                 # Remove atoms explained by endogenous processes
-                seg_add_effects, seg_del_effects = \
-                    self.remove_atoms_explained_by_endogenous_processes(  # type: ignore[assignment]
+                filtered_add: Set[Union[LiftedAtom, GroundAtom]]
+                filtered_del: Set[Union[LiftedAtom, GroundAtom]]
+                filtered_add, filtered_del = \
+                    self.remove_atoms_explained_by_endogenous_processes(
                         segment, self._endogenous_processes,
-                        set(seg_add_effects), set(seg_del_effects))  # type: ignore[arg-type]
-                seg_add_effects = frozenset(seg_add_effects)
-                seg_del_effects = frozenset(seg_del_effects)
+                        set(seg_add_effects), set(seg_del_effects))
+                seg_add_effects = frozenset(cast(Set[GroundAtom],
+                                                 filtered_add))
+                seg_del_effects = frozenset(cast(Set[GroundAtom],
+                                                 filtered_del))
 
-            suc, ent_to_ent_sub, pnad = self._unify_segment_with_pnads(  # type: ignore[misc]
+            suc, ent_to_ent_sub, pnad = \
+                self._unify_segment_with_pnads(  # type: ignore[misc]
                 preconds1, seg_add_effects, seg_del_effects,
                 segment_param_option, segment_option_objs, pnads)
 
@@ -547,16 +561,10 @@ class ClusteringProcessLearner(ClusteringSTRIPSLearner):
                     # `induce_preconditions_via_intersection`.
                     (pnad_param_option, pnad_option_vars) = pnad.option_spec
                     sub = self._find_best_segment_unification(
-                        segment,
-                        seg_add_effects,
-                        seg_del_effects,
-                        pnad,
-                        ent_to_ent_sub,
-                        segment_param_option,
-                        pnad_param_option,
-                        segment_option_objs,  # type: ignore[arg-type]
-                        tuple(pnad_option_vars),
-                        self._endogenous_processes)
+                        segment, seg_add_effects, seg_del_effects, pnad,
+                        ent_to_ent_sub, segment_param_option,
+                        pnad_param_option, segment_option_objs,
+                        tuple(pnad_option_vars), self._endogenous_processes)
                 else:
                     assert set(sub.keys()) == set(pnad.op.parameters)
                 pnad.add_to_datastore(
@@ -610,19 +618,40 @@ class ClusteringProcessLearner(ClusteringSTRIPSLearner):
                 ignore_effects: Set[Predicate] = set()  # will be learned later
                 if self.get_name() in ["cluster_and_search_process_learner"]:
                     # Remove atoms explained by endogenous processes
-                    lfd_add_effects, lfd_delete_effects = \
+                    lfd_add_eff_union: Set[Union[LiftedAtom, GroundAtom]]
+                    lfd_del_eff_union: Set[Union[LiftedAtom, GroundAtom]]
+                    lfd_add_eff_union, lfd_del_eff_union = \
                         self.remove_atoms_explained_by_endogenous_processes(
-                        segment, self._endogenous_processes, lfd_add_effects,
-                        lfd_delete_effects, obj_to_var)
-                    grd_add_effects, grd_delete_effects = \
-                        self.remove_atoms_explained_by_endogenous_processes(  # type: ignore[assignment]
-                        segment, self._endogenous_processes, grd_add_effects,  # type: ignore[arg-type]
-                        grd_delete_effects)  # type: ignore[arg-type]
+                        segment, self._endogenous_processes,
+                        cast(Set[Union[LiftedAtom, GroundAtom]],
+                             lfd_add_effects),
+                        cast(Set[Union[LiftedAtom, GroundAtom]],
+                             lfd_delete_effects),
+                        obj_to_var)
+                    lfd_add_effects = cast(Set[LiftedAtom], lfd_add_eff_union)
+                    lfd_delete_effects = cast(Set[LiftedAtom],
+                                              lfd_del_eff_union)
+                    remove_fn = (
+                        self.remove_atoms_explained_by_endogenous_processes)
+                    grd_add_eff_union: Set[Union[LiftedAtom, GroundAtom]]
+                    grd_del_eff_union: Set[Union[LiftedAtom, GroundAtom]]
+                    grd_add_eff_union, grd_del_eff_union = \
+                        remove_fn(
+                            segment,
+                            self._endogenous_processes,
+                            cast(Set[Union[LiftedAtom, GroundAtom]],
+                                 grd_add_effects),
+                            cast(Set[Union[LiftedAtom, GroundAtom]],
+                                 grd_delete_effects))
+                    grd_add_effects = cast(Set[GroundAtom], grd_add_eff_union)
+                    grd_delete_effects = cast(Set[GroundAtom],
+                                              grd_del_eff_union)
 
                     # ---- Single effect bias ----
                     if CFG.cluster_learning_one_effect_per_process:
                         #   If there are still processes with multiple effects,
-                        #   add multiple PNAD here; after checking such pnad don't
+                        #   add multiple PNAD here; after checking
+                        #   such pnad don't
                         #   already exists.
                         for atom in grd_add_effects | grd_delete_effects:
                             neg_atom = atom.get_negated_atom()
@@ -641,11 +670,13 @@ class ClusteringProcessLearner(ClusteringSTRIPSLearner):
                                 else:
                                     add_effect_set = frozenset()
                             # Check if the pnad already exists
-                            suc, ent_to_ent_sub, pnad =\
-                                self._unify_segment_with_pnads(  # type: ignore[misc]
-                                    frozenset(), add_effect_set, del_effect_set,
-                                    segment_param_option, segment_option_objs,
-                                    pnads)
+                            result = self._unify_segment_with_pnads(
+                                frozenset(), add_effect_set, del_effect_set,
+                                segment_param_option, segment_option_objs,
+                                pnads)
+                            suc, ent_to_ent_sub, pnad = (
+                                result  # type: ignore[misc]
+                            )
                             if suc:
                                 sub = cast(
                                     VarToObjSub,
@@ -653,24 +684,22 @@ class ClusteringProcessLearner(ClusteringSTRIPSLearner):
                                      for o, v in ent_to_ent_sub.items()})
                                 # Add to this PNAD.
                                 if CFG.exogenous_process_learner_do_intersect:
-                                    # Find the largest conditions that unifies the init
-                                    # atoms of the segment and another segment in the PNAD.
-                                    # and add that segment and sub to the datastore.
+                                    # Find the largest conditions that
+                                    # unifies the init atoms of the segment
+                                    # and another segment in the PNAD, and
+                                    # add that segment+sub to the datastore.
                                     # Doing this sequentially ensures one of the
-                                    # substitutions has the objects we care about with
-                                    # intersection. Hence it can fall out later in
+                                    # substitutions has the objects we
+                                    # care about with intersection. Hence
+                                    # it can fall out later in
                                     # `induce_preconditions_via_intersection`.
                                     (pnad_param_option,
                                      pnad_option_vars) = pnad.option_spec
                                     sub = self._find_best_segment_unification(
-                                        segment,
-                                        add_effect_set,
-                                        del_effect_set,
-                                        pnad,
-                                        ent_to_ent_sub,
+                                        segment, add_effect_set,
+                                        del_effect_set, pnad, ent_to_ent_sub,
                                         segment_param_option,
-                                        pnad_param_option,
-                                        segment_option_objs,  # type: ignore[arg-type]
+                                        pnad_param_option, segment_option_objs,
                                         tuple(pnad_option_vars),
                                         self._endogenous_processes)
                                 else:
@@ -736,7 +765,8 @@ class ClusteringProcessLearner(ClusteringSTRIPSLearner):
                 logging.info(pnad)
         return pnads
 
-    def _unify_segment_with_pnads(self, seg_preconds, seg_add_effects,  # type: ignore[no-untyped-def]
+    def _unify_segment_with_pnads(  # type: ignore[no-untyped-def]
+            self, seg_preconds, seg_add_effects,
                                   seg_del_effects, seg_param_option,
                                   seg_option_objs, pnads: List[PNAD]) -> \
                                   Tuple[bool, VarToObjSub]:
@@ -766,17 +796,17 @@ class ClusteringProcessLearner(ClusteringSTRIPSLearner):
                 pnad_param_option, seg_option_objs, tuple(pnad_option_vars))
             if suc:
                 return True, ent_to_ent_sub, pnad  # type: ignore[return-value]
-        return False, dict(), None  # type: ignore[return-value]
+        return False, {}, None  # type: ignore[return-value]
 
     @staticmethod
     def _find_best_segment_unification(
             segment: Segment, seg_add_eff: FrozenSet[GroundAtom],
             seg_del_eff: FrozenSet[GroundAtom], pnad: PNAD,
             obj_to_var: Dict[Object, Variable],
-            segment_param_option: ParameterizedOption,
-            pnad_param_option: ParameterizedOption,
-            segment_option_objs: Tuple[Object],
-            pnad_option_vars: Tuple[Variable],
+            _segment_param_option: ParameterizedOption,
+            _pnad_param_option: ParameterizedOption,
+            _segment_option_objs: Tuple[Object, ...],
+            _pnad_option_vars: Tuple[Variable, ...],
             endogenous_processes: List[EndogenousProcess]) -> VarToObjSub:
         """Try to unify and find the *best* set of matching init atoms between
         the given segment and the *last* segment in the PNAD's datastore, then
@@ -831,20 +861,20 @@ class ClusteringProcessLearner(ClusteringSTRIPSLearner):
 
         # Quick exits: nothing to match or no shared predicates.
         if not seg_pre_list or not pnad_pre_list:
-            return cast(VarToObjSub, {v: o for o, v in obj_to_var.items()})
+            return cast(VarToObjSub, dict(
+                (v, o) for o, v in obj_to_var.items()))
 
-        # ---------- 1) Start from the mapping returned by effects+options ----------
-        current_map: Dict[_TypedEntity, Variable] = dict(
-            obj_to_var)  # type: ignore[arg-type]
+        # ---------- 1) Start from the mapping returned by effects+options -----
+        current_map: Dict[_TypedEntity, Variable] = dict(obj_to_var.items())
 
-        # We'll try to extend current_map with as many precondition matches as possible.
+        # Try to extend current_map with as many precondition
+        # matches as possible.
         # Use weighted scoring that prioritizes effect-related atoms
-        best_map: Dict[_TypedEntity, Variable] = dict(current_map)
+        best_map: Dict[_TypedEntity, Variable] = {}
+        best_map.update(current_map)
         best_score: float = 0.0  # Changed to float for weighted scoring
 
-        # ---------- 2) Organize atoms by predicate for bounds & candidate search ----------
-        from collections import Counter, defaultdict
-
+        # ---------- 2) Organize atoms by predicate for bounds & candidate searc
         idx_pnad_by_pred: Dict[Predicate, List[int]] = defaultdict(list)
         for j, b in enumerate(pnad_pre_list):
             idx_pnad_by_pred[b.predicate].append(j)
@@ -890,7 +920,8 @@ class ClusteringProcessLearner(ClusteringSTRIPSLearner):
                 pnad_indices = [
                     j for j in idx_pnad_by_pred[pred] if j in pnad_unused
                 ]
-                # For each predicate, we can match at most min(seg_count, pnad_count)
+                # For each predicate, we can match at most min(seg_count,
+                # pnad_count)
                 max_matches = min(len(seg_indices), len(pnad_indices))
                 if max_matches > 0:
                     # Use maximum possible weight for this predicate
@@ -915,7 +946,8 @@ class ClusteringProcessLearner(ClusteringSTRIPSLearner):
                 # Types must match
                 if obj_ent.type != var_ent.type:
                     return None
-                # b side should be a Variable (usually), but handle if lifted constant
+                # b side should be a Variable (usually), but handle if lifted
+                # constant
                 if isinstance(var_ent, Variable):
                     # mapping consistency: obj -> var one-to-one
                     if obj_ent in mapping:
@@ -970,7 +1002,8 @@ class ClusteringProcessLearner(ClusteringSTRIPSLearner):
                     search(mapping, seg_left_minus_i, pnad_unused, score)
                     return
 
-                # Priority: high weight atoms with few candidates (more constrained)
+                # Priority: high weight atoms with few candidates (more
+                # constrained)
                 max_weight = max(c[2] for c in candidates)
                 priority = max_weight / (len(candidates) + 1
                                          )  # Favor constrained, high-weight
@@ -1014,20 +1047,17 @@ class ClusteringProcessLearner(ClusteringSTRIPSLearner):
     def remove_atoms_explained_by_endogenous_processes(
         segment: Segment,
         endogenous_processes: List[EndogenousProcess],
-        add_effects: Set[LiftedAtom],
-        delete_effects: Set[LiftedAtom],
+        add_effects: Set[Union[LiftedAtom, GroundAtom]],
+        delete_effects: Set[Union[LiftedAtom, GroundAtom]],
         obj_to_var: Optional[Dict[Object, Variable]] = None
-    ) -> Tuple[Set[LiftedAtom], Set[LiftedAtom]]:
-        """If obj_to_var is None, we are taking in a set of ground atoms.
+    ) -> Tuple[Set[Union[LiftedAtom, GroundAtom]], Set[Union[LiftedAtom,
+                                                             GroundAtom]]]:
+        """Remove effects explained by endogenous processes.
 
-        and will return a set of ground atoms. Otherwise they are
-        lifted. This is to account for some exogenous effect that may
-        happen in the same time as some endogenous effect.
+        If obj_to_var is None, operates on ground atoms; otherwise on
+        lifted atoms.
         """
-        if obj_to_var:
-            process_lifted_atoms = True
-        else:
-            process_lifted_atoms = False
+        process_lifted_atoms = bool(obj_to_var)
         objects = set(segment.states[0])
         seg_add_eff = segment.add_effects
         seg_del_eff = segment.delete_effects
@@ -1049,22 +1079,21 @@ class ClusteringProcessLearner(ClusteringSTRIPSLearner):
                 for a in delete_effects
                 if a.predicate not in endo_proc.ignore_effects
             }
-            var_to_obj = {
-                v: o
-                for v, o in zip(endo_proc.option_vars,
-                                segment.get_option().objects)
-            }
+            var_to_obj = dict(
+                zip(endo_proc.option_vars,
+                    segment.get_option().objects))
             for g_proc in utils.all_ground_operators_given_partial(
                     endo_proc, objects, var_to_obj):  # type: ignore[arg-type]
                 if g_proc.add_effects.issubset(seg_add_eff) and\
                     g_proc.delete_effects.issubset(seg_del_eff):
                     if process_lifted_atoms:
+                        assert obj_to_var is not None
                         add_effects -= {
-                            atom.lift(obj_to_var)  # type: ignore[arg-type]
+                            atom.lift(obj_to_var)
                             for atom in g_proc.add_effects
                         }
                         delete_effects -= {
-                            atom.lift(obj_to_var)  # type: ignore[arg-type]
+                            atom.lift(obj_to_var)
                             for atom in g_proc.delete_effects
                         }
                     else:
@@ -1075,7 +1104,8 @@ class ClusteringProcessLearner(ClusteringSTRIPSLearner):
                     #     f"Removed effects of {g_proc} \n from "
                     #     f"segment with \n add effect {seg_add_eff} "
                     #     f"and delete effect {seg_del_eff}\n"
-                    #     f"new add effects: {add_effects}, del effects: {delete_effects}")
+                    # f"new add effects: {add_effects}, del effects:
+                    # {delete_effects}")
         return add_effects, delete_effects
 
     @staticmethod
@@ -1107,11 +1137,6 @@ class ClusteringProcessLearner(ClusteringSTRIPSLearner):
         for i, candidate in enumerate(candidates_with_scores[:num_to_log]):
             score, condition_candidate = candidate
             logging.debug(f"{i}: {condition_candidate}, Score: {score:.4f}")
-            if CFG.use_wandb:
-                wandb.log({
-                    f"candidate_{i}_score": score,
-                    f"candidate_{i}_condition": str(condition_candidate)
-                })
         return candidates_with_scores[:position]
 
     def _get_top_consistent_conditions(self, initial_atom: Set[LiftedAtom],
@@ -1119,9 +1144,12 @@ class ClusteringProcessLearner(ClusteringSTRIPSLearner):
                                        seed: int) -> Iterator[Set[LiftedAtom]]:
         """Get the top consistent conditions for a PNAD."""
         exogenous_process = pnad.make_exogenous_process()
-        logging.debug(f"For Process sketch:\n{exogenous_process}")
-        candidates_with_scores = self.score_precondition_candidates(  # type: ignore[attr-defined]
-            exogenous_process, initial_atom, seed)
+        logging.debug("For Process sketch:\n%s", exogenous_process)
+        # pylint: disable=no-member
+        score_fn = self.score_precondition_candidates  # type: ignore
+        # pylint: enable=no-member
+        candidates_with_scores = score_fn(exogenous_process, initial_atom,
+                                          seed)
 
         if method == "top_p_percent":
             # Return top p% of candidates
@@ -1129,12 +1157,16 @@ class ClusteringProcessLearner(ClusteringSTRIPSLearner):
                 candidates_with_scores,
                 CFG.cluster_process_learner_top_p_percent,
                 CFG.cluster_process_learner_top_n_conditions)
-            num_top_candidates = len(top_candidates)
-            # Reocrd the total number of candidates
-            if self._total_num_candidates == 0:  # type: ignore[attr-defined]
-                self._total_num_candidates += num_top_candidates  # type: ignore[attr-defined]
+            num_top = len(top_candidates)
+            # Record the total number of candidates
+            # pylint: disable=attribute-defined-outside-init,access-member-before-definition
+            cnt = self._total_num_candidates  # type: ignore
+            if cnt == 0:
+                self._total_num_candidates = num_top  # type: ignore
             else:
-                self._total_num_candidates *= num_top_candidates  # type: ignore[attr-defined]
+                self._total_num_candidates = (  # type: ignore
+                    cnt * num_top)
+            # pylint: enable=attribute-defined-outside-init
         elif method == "top_n":
             # Return top n candidates
             n = CFG.cluster_process_learner_top_n_conditions
@@ -1145,16 +1177,14 @@ class ClusteringProcessLearner(ClusteringSTRIPSLearner):
 
         # Yield the selected candidates
         for candidate in top_candidates:
-            if len(candidate) == 2:
-                score, condition_candidate = candidate
-            else:
-                score, condition_candidate, _ = candidate  # type: ignore[unreachable]
+            score, condition_candidate = candidate[0], candidate[1]
             logging.info(
                 f"Selected condition: {condition_candidate}, Score: {score}")
             yield condition_candidate
 
 
 class ClusterAndSearchProcessLearner(ClusteringProcessLearner):
+    """ClusterAndSearchProcessLearner class."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         """Initialize the process learner."""
@@ -1181,8 +1211,8 @@ class ClusterAndSearchProcessLearner(ClusteringProcessLearner):
                         and cpu_cnt > 1)
 
         logging.info(
-            f"Learning preconditions for {len(pnads)} PNADs using a flat parallel pool."
-        )
+            "Learning preconditions for %d PNADs "
+            "using a flat parallel pool.", len(pnads))
 
         # Step 1: Generate candidate conditions
         (possible_atoms_per_pnad,
@@ -1194,9 +1224,8 @@ class ClusterAndSearchProcessLearner(ClusteringProcessLearner):
 
         # Step 2.5: Ablation - use top condition if flag is set
         if CFG.process_learner_ablate_bayes:
-            logging.info(
-                "Using ablation: taking top condition from condition_sets_per_pnad"
-            )
+            logging.info("Using ablation: taking top condition "
+                         "from condition_sets_per_pnad")
             best_conditions: Dict[int, FrozenSet[LiftedAtom]] = {}
 
             # Set up proc_name_to_results with placeholder values
@@ -1211,7 +1240,8 @@ class ClusterAndSearchProcessLearner(ClusteringProcessLearner):
                     best_condition = set()
                 best_conditions[i] = best_condition  # type: ignore[assignment]
 
-                # Create placeholder scored_conditions entry for proc_name_to_results
+                # Create placeholder scored_conditions entry
+                # for proc_name_to_results
                 # Format: (cost, frozenset(condition), scores_tuple, process)
                 placeholder_process = pnad.make_exogenous_process()
                 placeholder_process.condition_at_start = best_condition.copy()
@@ -1231,7 +1261,8 @@ class ClusterAndSearchProcessLearner(ClusteringProcessLearner):
             possible_atoms_per_pnad, condition_sets_per_pnad, cpu_cnt)
 
         # Step 4: Generate final candidates with pruning
-        final_candidates_for_pnad = self._generate_final_candidates_with_pruning(
+        final_candidates_for_pnad = \
+            self._generate_final_candidates_with_pruning(
             pnads, possible_atoms_per_pnad, condition_sets_per_pnad,
             min_candidates_to_keep)
 
@@ -1254,9 +1285,8 @@ class ClusterAndSearchProcessLearner(ClusteringProcessLearner):
             with Pool(nodes=min(len(work_items), cpu_cnt)) as pool:
                 results = pool.map(_flat_pnad_scoring_worker, work_items)
         else:
-            logging.info(
-                "Using sequential scoring as alternative to parallel processing."
-            )
+            logging.info("Using sequential scoring as "
+                         "alternative to parallel processing.")
             results = []
             for work_item in work_items:
                 result = _flat_pnad_scoring_worker(work_item)
@@ -1302,7 +1332,7 @@ class ClusterAndSearchProcessLearner(ClusteringProcessLearner):
         """Return number of worker processes to use based on config."""
         if CFG.process_learning_process_per_physical_core:
             return max(1, psutil.cpu_count(logical=False) - 1)
-        return max(1, mp.cpu_count() - 1)
+        return max(1, mp.cpu_count() - 1)  # pylint: disable=no-member
 
     def _build_process_descriptions(
         self,
@@ -1372,7 +1402,7 @@ class ClusterAndSearchProcessLearner(ClusteringProcessLearner):
             raise ValueError("LLM not available")
 
         # Load the prompt template
-        with open(template_path, "r") as f:
+        with open(template_path, "r", encoding='utf-8') as f:
             template = f.read()
 
         # Format the prompt
@@ -1387,7 +1417,8 @@ class ClusterAndSearchProcessLearner(ClusteringProcessLearner):
                                                 seed=seed)[0]
 
         # Save debug info
-        with open(f"{CFG.log_file}/{debug_filename}", "w") as f:
+        with open(f"{CFG.log_file}/{debug_filename}", "w",
+                  encoding='utf-8') as f:
             f.write(f"{prompt}\n=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*"
                     f"\n{response}")
 
@@ -1417,11 +1448,13 @@ class ClusterAndSearchProcessLearner(ClusteringProcessLearner):
         relevant/necessary for the PNAD's effects.
 
         Args:
-            possible_atoms_per_pnad: List of sets of possible precondition atoms, one set per PNAD
+            possible_atoms_per_pnad: List of sets of possible
+                precondition atoms, one set per PNAD
             pnads: Optional list of PNADs to get effect information from
 
         Returns:
-            List of lists of ranked atoms, keeping only the most relevant ones based on LLM assessment
+            List of lists of ranked atoms, keeping only
+            the most relevant ones based on LLM assessment
         """
         if not possible_atoms_per_pnad or self._llm is None:
             return [list(atoms) for atoms in possible_atoms_per_pnad]
@@ -1484,7 +1517,8 @@ class ClusterAndSearchProcessLearner(ClusteringProcessLearner):
                         ]
                         if valid_indices:
                             # Keep atoms in the order specified by LLM ranking
-                            # But limit to top N atoms to avoid combinatorial explosion
+                            # But limit to top N atoms to avoid combinatorial
+                            # explosion
                             if max_atoms is None:
                                 max_atoms = len(valid_indices)
                             else:
@@ -1511,13 +1545,12 @@ class ClusterAndSearchProcessLearner(ClusteringProcessLearner):
                 logging.info(
                     f"Process {i}: Kept {len(ranked)}/{len(original)} atoms")
                 logging.debug(f"  Kept atoms: {sorted(ranked, key=str)}")
-                logging.debug(
-                    f"  Removed atoms: {sorted(set(original) - set(ranked), key=str)}"
-                )
+                logging.debug("  Removed atoms: %s",
+                              sorted(set(original) - set(ranked), key=str))
 
             return ranked_atoms_per_pnad
 
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-except
             logging.warning(
                 f"LLM atom ranking failed: {e}, keeping original atoms")
             return [list(atoms) for atoms in possible_atoms_per_pnad]
@@ -1531,13 +1564,15 @@ class ClusterAndSearchProcessLearner(ClusteringProcessLearner):
         """Propose top k condition sets for each PNAD using LLM.
 
         Args:
-            possible_atoms_per_pnad: List of sets of possible precondition atoms, one set per PNAD
+            possible_atoms_per_pnad: List of sets of possible
+                precondition atoms, one set per PNAD
             pnads: Optional list of PNADs to get effect information from
             k: Number of condition sets to propose per PNAD
             batch_size: Maximum number of PNADs to process in each LLM call
 
         Returns:
-            List of lists of condition sets, where each condition set is a set of atoms
+            List of lists of condition sets, where each
+            condition set is a set of atoms
         """
         if not possible_atoms_per_pnad or self._llm is None:
             return [[set(atoms)] for atoms in possible_atoms_per_pnad]
@@ -1545,7 +1580,8 @@ class ClusterAndSearchProcessLearner(ClusteringProcessLearner):
         if k is None:
             k = CFG.process_learner_llm_propose_conditions_k
 
-        # If batch_size is not specified or if we have fewer PNADs than the limit,
+        # If batch_size is not specified or if we have fewer
+        # PNADs than the limit,
         # process all at once (original behavior)
         if (batch_size is None or len(possible_atoms_per_pnad) <= batch_size):
             return self._llm_propose_condition_sets_batch(
@@ -1574,7 +1610,7 @@ class ClusterAndSearchProcessLearner(ClusteringProcessLearner):
             self,
             possible_atoms_per_pnad: List[Set[LiftedAtom]],
             pnads: Optional[List[PNAD]] = None,
-            k: Optional[int] = None,
+            _k: Optional[int] = None,
             batch_idx: Optional[int] = None) -> List[List[Set[LiftedAtom]]]:
         """Process a batch of PNADs for condition set proposal."""
         try:
@@ -1632,10 +1668,10 @@ class ClusterAndSearchProcessLearner(ClusteringProcessLearner):
                     if line.startswith(f"Process {i}:"):
                         process_found = True
                         continue
-                    elif process_found and line.startswith("Process "):
+                    if process_found and line.startswith("Process "):
                         # Start of next process, break
                         break
-                    elif process_found and line.startswith("Set "):
+                    if process_found and line.startswith("Set "):
                         # Parse set line: "Set 1: [2,0,4]"
                         try:
                             set_part = line.split(":", 1)[1].strip()
@@ -1646,7 +1682,8 @@ class ClusterAndSearchProcessLearner(ClusteringProcessLearner):
                                     int(idx.strip())
                                     for idx in set_part.split(',')
                                 ]
-                                # Filter valid indices and get corresponding atoms
+                                # Filter valid indices and get corresponding
+                                # atoms
                                 valid_indices = [
                                     idx for idx in indices
                                     if 0 <= idx < len(sorted_atoms)
@@ -1658,9 +1695,8 @@ class ClusterAndSearchProcessLearner(ClusteringProcessLearner):
                                     }
                                     process_sets.append(condition_set)
                         except (ValueError, IndexError) as e:
-                            logging.warning(
-                                f"Failed to parse condition set for process {i}: {e}"
-                            )
+                            logging.warning("Failed to parse condition set "
+                                            f"for process {i}: {e}")
 
                 if not process_sets:
                     # No valid sets found, use original atoms as single set
@@ -1682,7 +1718,7 @@ class ClusterAndSearchProcessLearner(ClusteringProcessLearner):
 
             return condition_sets_per_pnad
 
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-except
             logging.warning(
                 f"LLM condition set proposal failed: {e}, using original atoms"
             )
@@ -1738,11 +1774,12 @@ class ClusterAndSearchProcessLearner(ClusteringProcessLearner):
 
         for i in range(max_candidates_across_pnads, 0, -1):
             total_candidates = sum(
-                [min(num, i) for num in max_candidates_per_pnad])
+                min(num, i) for num in max_candidates_per_pnad)
             if total_candidates <= cpu_cnt:
                 logging.info(
-                    f"Setting candidate cap per PNAD to {i} to utilize {cpu_cnt} CPUs "
-                    f"(total candidates: {total_candidates}).")
+                    "Setting candidate cap per PNAD "
+                    "to %d to utilize %d CPUs "
+                    "(total candidates: %d).", i, cpu_cnt, total_candidates)
                 min_candidates_to_keep = i
                 break
         return min_candidates_to_keep
@@ -1754,7 +1791,7 @@ class ClusterAndSearchProcessLearner(ClusteringProcessLearner):
             min_candidates_to_keep: int) -> Dict[int, List[Set[LiftedAtom]]]:
         """Generate final candidates with optional false positive pruning."""
         final_candidates_for_pnad: Dict[int, List[Set[LiftedAtom]]] = {}
-        indexed_pnads = {i: p for i, p in enumerate(pnads)}
+        indexed_pnads = dict(enumerate(pnads))
 
         fp_count_pruning = (
             CFG.process_scoring_method == 'data_likelihood'
@@ -1799,16 +1836,8 @@ class ClusterAndSearchProcessLearner(ClusteringProcessLearner):
             pnad_idx: int) -> List[Set[LiftedAtom]]:
         """Prune candidates using false positive count metric."""
         base_process = pnad.make_exogenous_process()
-        logging.debug(
-            f"Pruning {len(all_candidates)} candidates for PNAD {pnad_idx}:\n{base_process}"
-        )
-        if CFG.use_wandb:
-            wandb.log({
-                "pruning_info":
-                f"Pruning {len(all_candidates)} candidates for PNAD {pnad_idx}",
-                "base_process": str(base_process)
-            })
-
+        logging.debug("Pruning %d candidates for PNAD %d:\n%s",
+                      len(all_candidates), pnad_idx, base_process)
         candidates_with_approx_scores = []
         for candidate in all_candidates:
             base_process.condition_at_start = candidate
@@ -1816,8 +1845,9 @@ class ClusterAndSearchProcessLearner(ClusteringProcessLearner):
             complexity_penalty = (
                 CFG.process_condition_search_complexity_weight *
                 len(candidate))
-            false_positive_states = self._get_false_positive_states_from_seg_trajs(
-                self._atom_change_segmented_trajs, [base_process])
+            fp_fn = self._get_false_positive_states_from_seg_trajs
+            false_positive_states = fp_fn(self._atom_change_segmented_trajs,
+                                          [base_process])
             num_false_positives = sum(
                 len(s) for s in false_positive_states.values())
             cost = num_false_positives + complexity_penalty
@@ -1830,14 +1860,8 @@ class ClusterAndSearchProcessLearner(ClusteringProcessLearner):
             number=min_candidates_to_keep)
         pruned_candidates = [cand for _, cand in top_candidates]
 
-        logging.debug(
-            f"Pruned to {len(pruned_candidates)} candidates for PNAD {pnad_idx}."
-        )
-        if CFG.use_wandb:
-            wandb.log({
-                "pruned_candidates_count": len(pruned_candidates),
-                "pnad_id": pnad_idx
-            })
+        logging.debug("Pruned to %d candidates for PNAD %d.",
+                      len(pruned_candidates), pnad_idx)
 
         return pruned_candidates
 
@@ -1856,7 +1880,7 @@ class ClusterAndSearchProcessLearner(ClusteringProcessLearner):
             save_dir = os.path.join(
                 load_save_dir, f"online_cycle_{self.online_learning_cycle}")
 
-        indexed_pnads = {i: p for i, p in enumerate(pnads)}
+        indexed_pnads = dict(enumerate(pnads))
         work_items = []
 
         for i, pnad in indexed_pnads.items():
@@ -1878,7 +1902,7 @@ class ClusterAndSearchProcessLearner(ClusteringProcessLearner):
             final_candidates_for_pnad: Dict[int, List[Set[LiftedAtom]]],
             pnads: List[PNAD]) -> Dict[int, FrozenSet[LiftedAtom]]:
         """Process parallel scoring results and select best conditions."""
-        indexed_pnads = {i: p for i, p in enumerate(pnads)}
+        indexed_pnads = dict(enumerate(pnads))
         pnad_scores: Dict[int,
                           List[Tuple[float, FrozenSet[LiftedAtom], Tuple[float,
                                                                          ...],
@@ -1910,19 +1934,12 @@ class ClusterAndSearchProcessLearner(ClusteringProcessLearner):
     def _log_scored_conditions(self, pnad_idx: int, scored_conditions: List,
                                pnad: PNAD) -> None:
         """Log the scored conditions for debugging."""
-        logging.debug(
-            f"Scored conditions for Process sketch {pnad_idx}:\n{pnad.make_exogenous_process()}"
-        )
-        if CFG.use_wandb:
-            wandb.log({
-                f"process_sketch_{pnad_idx}":
-                str(pnad.make_exogenous_process())
-            })
-
+        logging.debug("Scored conditions for Process sketch "
+                      "%d:\n%s", pnad_idx, pnad.make_exogenous_process())
         for rank, result in enumerate(scored_conditions):
             cost, condition_candidate, scores, process = result
-            process_param_str = ", ".join(
-                [f"{v:.4f}" for v in process._get_parameters()])
+            params = process._get_parameters()  # pylint: disable=protected-access
+            process_param_str = ", ".join([f"{v:.4f}" for v in params])
             logging.debug(f"Conditions {rank}: "
                           f"{sorted(condition_candidate)}, "
                           f"Cost: {cost}, "
@@ -1932,7 +1949,7 @@ class ClusterAndSearchProcessLearner(ClusteringProcessLearner):
                           f"Entropy: {scores[3]:.4f}, "
                           f"Process params: {process_param_str}")
 
-    def _select_best_condition(self, pnad_idx: int, scored_conditions: List,
+    def _select_best_condition(self, _pnad_idx: int, scored_conditions: List,
                                pnad: PNAD) -> FrozenSet[LiftedAtom]:
         """Select the best condition from scored candidates."""
         multiple_top_conditions = False
@@ -1958,7 +1975,7 @@ class ClusterAndSearchProcessLearner(ClusteringProcessLearner):
                                                      FrozenSet[LiftedAtom]],
                                pnads: List[PNAD]) -> List[PNAD]:
         """Construct the final unique PNADs with learned preconditions."""
-        indexed_pnads = {i: p for i, p in enumerate(pnads)}
+        indexed_pnads = dict(enumerate(pnads))
         final_pnads: List[PNAD] = []
 
         for pnad_idx in sorted(best_conditions.keys()):
@@ -2021,18 +2038,18 @@ class ClusterAndSearchProcessLearner(ClusteringProcessLearner):
             "/predicators/nsrt_learning/strips_learning/" + \
             "llm_op_learning_prompts/"+\
             "cluster_and_search_process_learner_condition_select.prompt"
-        with open(prompt_file, "r") as f:
+        with open(prompt_file, "r", encoding='utf-8') as f:
+            # pylint: disable-next=attribute-defined-outside-init
             self.template = f.read()
 
         # 2. Fill the prompt template.
+        proc = pnad.make_exogenous_process()
+        proc_str = proc._str_wo_params  # pylint: disable=protected-access
         prompt = self.template.format(
-            EXOGENOUS_PROCESS_SKETCH=\
-                                pnad.make_exogenous_process()._str_wo_params,
+            EXOGENOUS_PROCESS_SKETCH=proc_str,
             TOP_SCORING_CONDITIONS="\n".join(
                 f"Conditions {i}: {sorted(condition)}"
-                for i, (_, condition, _, _) in enumerate(scored_conditions)
-            )
-        )
+                for i, (_, condition, _, _) in enumerate(scored_conditions)))
 
         # 3. Prompt the LLM.
         response = self._llm.sample_completions(prompt,
@@ -2042,7 +2059,8 @@ class ClusterAndSearchProcessLearner(ClusteringProcessLearner):
 
         # Save the prompt and response for debugging
         with open(f"{CFG.log_file}/pnad_{pnad.op.name}_cond_select.txt",
-                  "w") as f:
+                  "w",
+                  encoding='utf-8') as f:
             f.write(f"{prompt}\n=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*\n"
                     f"{response}")
 
@@ -2067,10 +2085,12 @@ class ClusterAndSearchProcessLearner(ClusteringProcessLearner):
 
 
 class ClusterAndInversePlanningProcessLearner(ClusteringProcessLearner):
+    """ClusterAndInversePlanningProcessLearner class."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
 
+        # pylint: disable-next=import-outside-toplevel
         from predicators.predicate_search_score_functions import \
             _ExpectedNodesScoreFunction
         self._get_optimality_prob =\
@@ -2133,7 +2153,8 @@ class ClusterAndInversePlanningProcessLearner(ClusteringProcessLearner):
                 # - 2^10 * 2^10 * 2^10 * 2^10 = 2^40 = 1,099,511,627,776
                 # Get the initial conditions of the PNAD
                 conditions_at_start.append(utils.all_subsets(init_lift_atoms))
-            elif CFG.cluster_and_inverse_planning_candidates == "top_consistent":
+            elif CFG.cluster_and_inverse_planning_candidates \
+                    == "top_consistent":
                 conditions_at_start.append(
                     self._get_top_consistent_conditions(
                         init_lift_atoms, pnad,
@@ -2158,9 +2179,9 @@ class ClusterAndInversePlanningProcessLearner(ClusteringProcessLearner):
             if cost < best_cost:
                 best_cost = cost
                 best_conditions = combination
-            logging.debug(
-                f"Combination {i+1}/{self._total_num_candidates}: cost = {cost},"
-                f" Best cost = {best_cost}")
+            logging.debug("Combination %d/%d: cost = %s,"
+                          " Best cost = %s", i + 1, self._total_num_candidates,
+                          cost, best_cost)
 
         # --- Create new PNADs with the best conditions ---
         final_pnads: List[PNAD] = []
@@ -2180,7 +2201,7 @@ class ClusterAndInversePlanningProcessLearner(ClusteringProcessLearner):
                     tuple(final_pnad.option_spec[1]),
                 )
                 if suc:
-                    # TODO: merge datastores if they are the same
+                    # Future: merge datastores if they are the same
                     break
             else:
                 # If we reach here, it means the PNAD is unique
@@ -2194,7 +2215,7 @@ class ClusterAndInversePlanningProcessLearner(ClusteringProcessLearner):
             self, exogenous_processes: Set[ExogenousProcess]) -> float:
         """Score the PNAD based on how well it allows the agent to make
         plans."""
-        # TODO: also incorporate number of nodes expanded to the function
+        # Future: also incorporate number of nodes expanded
         cost = 0.0
         for i, traj in enumerate(self._trajectories):
             if not traj.is_demo:
@@ -2212,14 +2233,11 @@ class ClusterAndInversePlanningProcessLearner(ClusteringProcessLearner):
                 use_visited_state_set=True)
 
             optimality_prob = 0.0
-            num_nodes = CFG.grammar_search_expected_nodes_upper_bound
             try:
-                for idx, (_, plan_atoms_sequence,
-                          metrics) in enumerate(generator):
-                    num_nodes = metrics["num_nodes_created"]
+                for (_, plan_atoms_sequence, _metrics) in generator:
                     optimality_prob = self._get_optimality_prob(
-                        demo_atoms_sequence,
-                        plan_atoms_sequence)  # type: ignore[arg-type]
+                        demo_atoms_sequence,  # type: ignore[arg-type]
+                        plan_atoms_sequence)
             except (PlanningTimeout, PlanningFailure):
                 pass
             # low_quality_prob = 1.0 - optimality_prob

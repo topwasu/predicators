@@ -8,7 +8,6 @@ python predicators/main.py --approach oracle --env pybullet_balance --seed 1 \
 --excluded_predicates "Balanced,OnPlate" --sesame_max_skeletons_optimized 1 \
 --sesame_check_expected_atoms False --pybullet_ik_validate False
 """
-import logging
 from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Optional, Sequence, Set, Tuple, \
     Union
@@ -16,14 +15,13 @@ from typing import Any, ClassVar, Dict, List, Optional, Sequence, Set, Tuple, \
 import numpy as np
 import pybullet as p
 
-from predicators import utils
 from predicators.envs.pybullet_env import PyBulletEnv, create_pybullet_block
-from predicators.pybullet_helpers.geometry import Pose, Pose3D, Quaternion
+from predicators.pybullet_helpers.geometry import Pose3D, Quaternion
 from predicators.pybullet_helpers.robots import SingleArmPyBulletRobot
 from predicators.settings import CFG
 from predicators.structs import Action, Array, ConceptPredicate, \
     EnvironmentTask, GroundAtom, NSPredicate, Object, Predicate, State, Type
-from predicators.utils import RawState, VLMQuery
+from predicators.utils import VLMQuery
 
 
 class PyBulletBalanceEnv(PyBulletEnv):
@@ -89,9 +87,10 @@ class PyBulletBalanceEnv(PyBulletEnv):
     _num_blocks_train = CFG.balance_num_blocks_train
     _num_blocks_test = CFG.balance_num_blocks_test
 
-    def __init__(self, use_gui: bool = True) -> None:
+    def __init__(self, use_gui: bool = False) -> None:
         # Types
-        # bbox_features = ["bbox_left", "bbox_right", "bbox_upper", "bbox_lower"]
+        # bbox_features = ["bbox_left", "bbox_right",
+        #                  "bbox_upper", "bbox_lower"]
         self._block_type = Type(
             "block",
             ["x", "y", "z", "is_held", "color_r", "color_g", "color_b"
@@ -114,6 +113,8 @@ class PyBulletBalanceEnv(PyBulletEnv):
             for i in range(max(self._num_blocks_train + self._num_blocks_test))
         ]
 
+        self._prev_diff = 0
+
         super().__init__(use_gui)
 
         # Predicates
@@ -122,7 +123,8 @@ class PyBulletBalanceEnv(PyBulletEnv):
             [self._block_type, self._block_type],
             self._DirectlyOn_holds,
             # lambda objs:
-            # f"{objs[0]} is directly on top of {objs[1]} with no blocks in between."
+            # f"{objs[0]} is directly on top of
+            # {objs[1]} with no blocks in between."
         )
         self._DirectlyOnPlate = Predicate(
             "DirectlyOnPlate",
@@ -195,6 +197,7 @@ class PyBulletBalanceEnv(PyBulletEnv):
 
     @property
     def concept_predicates(self) -> Set[ConceptPredicate]:
+        """Concept predicates."""
         return {self._Balanced_abs}
 
     @property
@@ -328,9 +331,9 @@ class PyBulletBalanceEnv(PyBulletEnv):
             r, g, b, _ = visual_data[7]
             if feature == "color_r":
                 return r
-            elif feature == "color_g":
+            if feature == "color_g":
                 return g
-            elif feature == "color_b":
+            if feature == "color_b":
                 return b
         elif obj.type == self._machine_type:
             if feature == "is_on":
@@ -345,7 +348,10 @@ class PyBulletBalanceEnv(PyBulletEnv):
 
         raise ValueError(f"Unknown feature {feature} for object {obj}")
 
-    def step(self, action: Action, render_obs: bool = False) -> State:
+    def step(  # pylint: disable=redefined-outer-name
+            self,
+            action: Action,
+            render_obs: bool = False) -> State:
         state = super().step(action, render_obs=render_obs)
 
         self._update_balance_beam(state)
@@ -514,8 +520,8 @@ class PyBulletBalanceEnv(PyBulletEnv):
                 return True
         other_blocks = {
             a.objects[0]
-            for a in atoms if a.predicate == self._DirectlyOn
-            or a.predicate == self._OnPlate_abs
+            for a in atoms
+            if a.predicate in (self._DirectlyOn, self._OnPlate_abs)
         }
 
         for other_block in other_blocks:
@@ -555,6 +561,7 @@ class PyBulletBalanceEnv(PyBulletEnv):
 
     # Function to count the number of blocks in the tower
     def count_num_blocks(self, state: State, table: Object) -> int:
+        """Count num blocks."""
 
         def count_recursive(base_obj: Object,
                             count: int) -> int:  # type: ignore[no-untyped-def]
@@ -602,31 +609,11 @@ class PyBulletBalanceEnv(PyBulletEnv):
     def _Balanced_CP_holds(self, atoms: Set[GroundAtom],
                            objects: Sequence[Object]) -> bool:
         """Check if the blocks are balanced on the table."""
+        del atoms  # unused
         plate1, table2 = objects
         if plate1 == table2:
             return False
         return True
-
-        # Function to count the number of blocks in the tower
-        def count_num_blocks(table):  # type: ignore[unreachable]
-
-            def count_recursive(base_obj, count):
-                for atom in atoms:
-                    if atom.predicate == self._DirectlyOn and\
-                            atom.objects[1] == base_obj:
-                        count = count_recursive(atom.objects[0], count + 1)
-                    elif atom.predicate == self._DirectlyOnPlate and\
-                            atom.objects[1] == base_obj:
-                        count = count_recursive(atom.objects[0], count + 1)
-                return count
-
-            return count_recursive(table, 0)
-
-        # Get the height of the blocks using recursion
-        height1 = count_num_blocks(plate1)
-        height2 = count_num_blocks(table2)
-
-        return height1 == height2
 
     def _DirectlyOn_holds(self, state: State,
                           objects: Sequence[Object]) -> bool:
@@ -655,12 +642,10 @@ class PyBulletBalanceEnv(PyBulletEnv):
                 (desired_z-self.on_tol < z < desired_z+self.on_tol):
             if table.name == "plate1":
                 return y < self._table2_y
-            elif table.name == "plate3":
+            if table.name == "plate3":
                 return y > self._table2_y
-            else:
-                raise ValueError("Invalid table name")
-        else:
-            return False
+            raise ValueError("Invalid table name")
+        return False
 
     def _GripperOpen_holds(self, state: State,
                            objects: Sequence[Object]) -> bool:
@@ -691,7 +676,7 @@ class PyBulletBalanceEnv(PyBulletEnv):
                 return block
         return None
 
-    def _Clear_NSP_holds(self, state: RawState, objects: Sequence[Object]) -> \
+    def _Clear_NSP_holds(self, state: State, objects: Sequence[Object]) -> \
             Union[bool, VLMQuery]:
         """Is there no block on top of the block."""
         block, = objects
@@ -702,7 +687,7 @@ class PyBulletBalanceEnv(PyBulletEnv):
                 return False
         return True
 
-    def _Holding_NSP_holds(self, state: RawState, objects: Sequence[Object]) ->\
+    def _Holding_NSP_holds(self, state: State, objects: Sequence[Object]) ->\
             bool:
         """Is the robot holding the block."""
         block, = objects
@@ -714,8 +699,8 @@ class PyBulletBalanceEnv(PyBulletEnv):
             return False
 
         # Using simple heuristics to check if they have overlap
-        block_bbox = state.get_obj_bbox(block)
-        robot_bbox = state.get_obj_bbox(robot)
+        block_bbox = state.get_obj_bbox(block)  # type: ignore[attr-defined]
+        robot_bbox = state.get_obj_bbox(robot)  # type: ignore[attr-defined]
         if block_bbox.right < robot_bbox.left or \
             block_bbox.left > robot_bbox.right or\
             block_bbox.upper < robot_bbox.lower or\
@@ -723,36 +708,40 @@ class PyBulletBalanceEnv(PyBulletEnv):
             return False
 
         block_name = block.id_name
-        attention_image = state.crop_to_objects([block, robot])
-        return state.evaluate_simple_assertion(  # type: ignore[return-value]
+        attention_image = state.crop_to_objects(  # type: ignore[attr-defined]
+            [block, robot])
+        # pylint: disable-next=line-too-long
+        return state.evaluate_simple_assertion(  # type: ignore[return-value,attr-defined]
             f"{block_name} is held by the robot", attention_image)
 
-    def _GripperOpen_NSP_holds(self, state: RawState, objects: Sequence[Object]) ->\
-            bool:
+    def _GripperOpen_NSP_holds(self, state: State,
+                               objects: Sequence[Object]) -> bool:
         """Is the robots gripper open."""
         robot, = objects
         finger_state = state.get(robot, "fingers")
         return finger_state > 0.03
 
-
-    def _DirectlyOnPlate_NSP_holds(self, state: RawState, objects: Sequence[Object]) ->\
-            bool:
+    def _DirectlyOnPlate_NSP_holds(self, state: State,
+                                   objects: Sequence[Object]) -> bool:
         """Determine if the block in objects is directly resting on the table's
         surface in the scene image."""
         block, = objects
         block_name = block.id_name
 
-        # We know there is only one table in this environment.
+        # We know there is only one table in this env.
         plate = state.get_objects(self._plate_type)[0]
         plate_name = plate.id_name
-        # Crop the image to the smallest bounding box that include both objects.
-        attention_image = state.crop_to_objects([block, plate])
+        # Crop the image to the smallest bounding box
+        # that includes both objects.
+        attention_image = state.crop_to_objects(  # type: ignore[attr-defined]
+            [block, plate])
 
-        return state.evaluate_simple_assertion(  # type: ignore[return-value]
-            f"{block_name} is directly resting on {plate_name}'s surface.",
-            attention_image)
+        # pylint: disable-next=line-too-long
+        return state.evaluate_simple_assertion(  # type: ignore[return-value,attr-defined]
+            f"{block_name} is directly resting on "
+            f"{plate_name}'s surface.", attention_image)
 
-    def _DirectlyOn_NSP_holds(self, state: RawState,
+    def _DirectlyOn_NSP_holds(self, state: State,
                               objects: Sequence[Object]) -> bool:
         """Determine if the first block in objects is directly on top of the
         second block with no blocks in between in the scene image, by using a
@@ -766,20 +755,28 @@ class PyBulletBalanceEnv(PyBulletEnv):
             return False
 
         # Situations where we're certain that block1 won't be above block2
-        if state.get(block1, "bbox_lower") < state.get(block2, "bbox_lower") or\
-           state.get(block1, "bbox_left") > state.get(block2, "bbox_right") or\
-           state.get(block1, "bbox_right") < state.get(block2, "bbox_left") or\
-           state.get(block1, "bbox_upper") < state.get(block2, "bbox_upper") or\
-           state.get(block1, "z") < state.get(block2, "z"):
+        b1_lower = state.get(block1, "bbox_lower")
+        b2_lower = state.get(block2, "bbox_lower")
+        b1_left = state.get(block1, "bbox_left")
+        b2_right = state.get(block2, "bbox_right")
+        b1_right = state.get(block1, "bbox_right")
+        b2_left = state.get(block2, "bbox_left")
+        b1_upper = state.get(block1, "bbox_upper")
+        b2_upper = state.get(block2, "bbox_upper")
+        if (b1_lower < b2_lower or b1_left > b2_right or b1_right < b2_left
+                or b1_upper < b2_upper
+                or state.get(block1, "z") < state.get(block2, "z")):
             return False
 
-        # Use a VLM query to handle to reminder cases
-        # Crop the scene image to the smallest bounding box that include both
-        # objects.
-        attention_image = state.crop_to_objects([block1, block2])
-        return state.evaluate_simple_assertion(  # type: ignore[return-value]
-            f"{block1_name} is directly on top of {block2_name} with no " +
-            "blocks in between.", attention_image)
+        # Use a VLM query to handle remaining cases.
+        # Crop the scene image to the smallest bounding
+        # box that includes both objects.
+        attention_image = state.crop_to_objects(  # type: ignore[attr-defined]
+            [block1, block2])
+        # pylint: disable-next=line-too-long
+        return state.evaluate_simple_assertion(  # type: ignore[return-value,attr-defined]
+            f"{block1_name} is directly on top of "
+            f"{block2_name} with no blocks in between.", attention_image)
 
     # -------------------------------------------------------------------------
     # Task Generation
@@ -793,7 +790,8 @@ class PyBulletBalanceEnv(PyBulletEnv):
                                 possible_num_blocks=self._num_blocks_test,
                                 rng=self._test_rng)
 
-    def _load_task_from_json(self, json_file: Path) -> EnvironmentTask:
+    def _load_task_from_json(  # pylint: disable=redefined-outer-name
+            self, json_file: Path) -> EnvironmentTask:
         task = super()._load_task_from_json(json_file)
         return self._add_pybullet_state_to_tasks([task])[0]
 
@@ -814,7 +812,7 @@ class PyBulletBalanceEnv(PyBulletEnv):
     def _make_tasks(self, num_tasks: int, possible_num_blocks: List[int],
                     rng: np.random.Generator) -> List[EnvironmentTask]:
         tasks = []
-        for idx in range(num_tasks):
+        for _idx in range(num_tasks):
             num_blocks = rng.choice(possible_num_blocks, p=[0.3, 0.7])
             piles = self._sample_initial_piles(num_blocks, rng)
             init_state = self._sample_state_from_piles(piles, rng)
@@ -833,7 +831,7 @@ class PyBulletBalanceEnv(PyBulletEnv):
         return self._add_pybullet_state_to_tasks(tasks)
 
     def _sample_initial_piles(self, num_blocks: int,
-                              rng: np.random.Generator) -> List[List[Object]]:
+                              _rng: np.random.Generator) -> List[List[Object]]:
         n_piles = 0
         piles: List[List[Object]] = []
         # for block_num, block in enumerate(self._blocks):
@@ -846,7 +844,7 @@ class PyBulletBalanceEnv(PyBulletEnv):
             #     n_piles += 1
             #     piles.append([])
             # For generating a 1:5 pile
-            if (block_num == 0 or block_num == 1):
+            if block_num in (0, 1):
                 n_piles += 1
                 piles.append([])
             # For generating a 0:6 pile
@@ -954,7 +952,7 @@ class PyBulletBalanceEnv(PyBulletEnv):
 
 
 if __name__ == "__main__":
-    """Run a simple simulation to test the environment."""
+    # Run a simple simulation to test the environment.
     import time
 
     # Make a task
@@ -962,12 +960,12 @@ if __name__ == "__main__":
     CFG.num_train_tasks = 0
     CFG.num_test_tasks = 1
     env = PyBulletBalanceEnv(use_gui=True)
-    task = env._generate_test_tasks()[0]
-    env._reset_state(task.init)
+    task = env._generate_test_tasks()[0]  # pylint: disable=protected-access
+    env._reset_state(task.init)  # pylint: disable=protected-access
 
     while True:
         # Robot does nothing
-        action = Action(np.array(env._pybullet_robot.get_joints()))
+        action = Action(np.array(env._pybullet_robot.get_joints()))  # pylint: disable=protected-access
 
         env.step(action)
         time.sleep(0.01)

@@ -43,7 +43,6 @@ from pathlib import Path
 from typing import Any, List, Optional, Sequence, Tuple, Union
 
 import dill as pkl
-import wandb
 
 from predicators import utils
 from predicators.approaches import ApproachFailure, ApproachTimeout, \
@@ -155,12 +154,6 @@ def main() -> None:
     utils.configure_logging()
     os.makedirs(CFG.results_dir, exist_ok=True)
     os.makedirs(CFG.eval_trajectories_dir, exist_ok=True)
-
-    # Initialize wandb if enabled
-    if CFG.use_wandb:
-        wandb.init(project="predicators",
-                   config=vars(CFG),
-                   name=f"{CFG.env}_{CFG.approach}_{CFG.seed}")
 
     # Log initial info
     utils.log_initial_info(str_args)
@@ -291,8 +284,11 @@ def _run_online_learning_loop(env: BaseEnv, cogman: CogMan,
                 "Did not receive any interaction requests, terminating")
             break
 
-        interaction_results, query_cost, task_solved_status = _generate_interaction_results(
-            cogman, env, teacher, interaction_requests, i)
+        (interaction_results, query_cost,
+         task_solved_status) = \
+            _generate_interaction_results(
+                cogman, env, teacher,
+                interaction_requests, i)
 
         # Track first solve attempt per task for solve rate calculation
         task_first_solve_attempts = {
@@ -318,18 +314,6 @@ def _run_online_learning_loop(env: BaseEnv, cogman: CogMan,
                          f"({sum(task_first_solve_attempts.values())}/"
                          f"{len(task_first_solve_attempts)})")
 
-            # Log to wandb if enabled
-            if CFG.use_wandb:
-                wandb.log({
-                    "train_task_solve_rate":
-                    train_task_solve_rate,
-                    "online_learning_cycle":
-                    i,
-                    "num_tasks_attempted":
-                    len(task_first_solve_attempts),
-                    "num_tasks_solved":
-                    sum(task_first_solve_attempts.values())
-                })
         else:
             train_task_solve_rate = 0.0
 
@@ -372,9 +356,10 @@ def _run_online_learning_loop(env: BaseEnv, cogman: CogMan,
             _save_test_results(results, online_learning_cycle=i)
             test_solve_rate = results["test_solve_rate"]
         else:
-            logging.info(
-                f"Skipping testing for cycle {i} due to skip_test_until_last_ite_or_early_stopping flag"
-            )
+            logging.info("Skipping testing for cycle "
+                         f"{i} due to "
+                         "skip_test_until_last_ite_or"
+                         "_early_stopping flag")
 
         if early_stopping:
             break
@@ -535,7 +520,8 @@ def _run_testing(env: BaseEnv, cogman: CogMan) -> Metrics:
         # Optionally save partial-refinement-based video
         if (CFG.make_failure_videos or CFG.make_failure_images) and\
               partial_refinements:
-            logging.info(f"Creating video from partial refinements...")
+            logging.info("Creating video from partial "
+                         "refinements...")
             video = utils.create_video_from_partial_refinements(
                 partial_refinements, env, "test", task_idx, CFG.horizon)
             if CFG.make_failure_images:
@@ -551,7 +537,7 @@ def _run_testing(env: BaseEnv, cogman: CogMan) -> Metrics:
             raise e
         return total_num_solve_timeouts, total_num_solve_failures
 
-    def _solve_task(task_idx: int, env_task: EnvironmentTask) -> float:
+    def _solve_task(_task_idx: int, env_task: EnvironmentTask) -> float:
         """Try to solve the given env_task using cogman, returning the solve
         time."""
         solve_start = time.perf_counter()
@@ -568,7 +554,8 @@ def _run_testing(env: BaseEnv, cogman: CogMan) -> Metrics:
         solved.
 
         Returns:
-            (solved, caught_exception, exec_time, num_options_executed, low_level_action_cost)
+            (solved, caught_exception, exec_time,
+             num_options_executed, low_level_action_cost)
         """
         solved = False
         caught_exception = False
@@ -590,6 +577,7 @@ def _run_testing(env: BaseEnv, cogman: CogMan) -> Metrics:
 
             # Optionally save a successful trajectory
             if CFG.save_eval_trajs:
+                os.makedirs(CFG.eval_trajectories_dir, exist_ok=True)
                 traj_file = f"{save_prefix}__task{task_idx+1}.traj"
                 traj_file_path = Path(CFG.eval_trajectories_dir) / traj_file
                 traj_data = {
@@ -613,10 +601,12 @@ def _run_testing(env: BaseEnv, cogman: CogMan) -> Metrics:
             caught_exception = True
 
         # Debug final state
+        # pylint: disable=protected-access
         if hasattr(cogman._approach, "_get_current_predicates"):
             abstract_state = utils.abstract(
                 env.get_observation(),
                 cogman._approach._get_current_predicates())
+            # pylint: enable=protected-access
             logging.debug(f"Final abstract state:\n{abstract_state}")
         logging.debug(f"Final state:\n{env.get_observation().pretty_str()}")
 
@@ -629,7 +619,7 @@ def _run_testing(env: BaseEnv, cogman: CogMan) -> Metrics:
     # --------------------------------------------------------------------------
     # Main testing loop
     # --------------------------------------------------------------------------
-    cogman._approach.begin_test_phase()
+    cogman._approach.begin_test_phase()  # pylint: disable=protected-access
     for test_task_idx, env_task in enumerate(test_tasks):
         # ---------------------
         # 1) Solve phase
@@ -645,7 +635,7 @@ def _run_testing(env: BaseEnv, cogman: CogMan) -> Metrics:
             logging.info(f"[main.py] Task {test_task_idx+1} / "
                          f"{len(test_tasks)}: approach failed with error: {e}")
             _handle_solve_exception(e, test_task_idx, partial_refinements)
-            # TODO: handle impossible goals here
+            # Handle impossible goals here
             if CFG.env_has_impossible_goals:
                 task_solvable = env.is_task_solvable(env_task)
                 if not task_solvable:
@@ -679,7 +669,7 @@ def _run_testing(env: BaseEnv, cogman: CogMan) -> Metrics:
                       or CFG.make_test_images or CFG.make_failure_images)
         monitor = utils.VideoMonitor(env.render) if need_video else None
 
-        logging.info(f"Executing policy...")
+        logging.info("Executing policy...")
         solved, caught_exception, exec_time, num_opts, traj = _execute_policy(
             test_task_idx, env_task, monitor)
 
@@ -706,8 +696,10 @@ def _run_testing(env: BaseEnv, cogman: CogMan) -> Metrics:
             if CFG.make_test_images:
                 _save_images(monitor, is_failure=False, task_idx=test_task_idx)
             # Count how many steps we took
-            # (We rely on the last trajectory from run_episode_and_get_observations)
-            # If you need the real trajectory, you'd store it as in `_execute_policy`.
+            # (We rely on the last trajectory from
+            # run_episode_and_get_observations)
+            # If you need the real trajectory, you'd store
+            # it as in `_execute_policy`.
             # Suppose we do that here (execution_metrics / logging):
             metrics[f"PER_TASK_task{test_task_idx}_num_steps"] = len(traj[1])
         else:
@@ -725,7 +717,7 @@ def _run_testing(env: BaseEnv, cogman: CogMan) -> Metrics:
 
         logging.info(f"Task {test_task_idx+1} / {len(test_tasks)}: {log_msg}")
 
-    cogman._approach.end_test_phase()
+    cogman._approach.end_test_phase()  # pylint: disable=protected-access
 
     # --------------------------------------------------------------------------
     # Aggregate final metrics
@@ -775,6 +767,7 @@ def _save_test_results(results: Metrics,
     avg_suc_time = results["avg_suc_time"]
     logging.info(f"Tasks solved: {num_solved} / {num_total}")
     logging.info(f"Average time for successes: {avg_suc_time:.5f} seconds")
+    os.makedirs(CFG.results_dir, exist_ok=True)
     outfile = (f"{CFG.results_dir}/{utils.get_config_path_str()}__"
                f"{online_learning_cycle}.pkl")
     # Save CFG alongside results.

@@ -142,7 +142,7 @@ class CoffeeEnv(BaseEnv):
     max_angular_vel: ClassVar[float] = tilt_ub
     max_finger_vel: ClassVar[float] = 1.0
 
-    def __init__(self, use_gui: bool = True) -> None:
+    def __init__(self, use_gui: bool = False) -> None:
         super().__init__(use_gui)
 
         # Types
@@ -570,7 +570,8 @@ class CoffeeEnv(BaseEnv):
                 num_cups = 0
             else:
                 num_cups = num_cups_lst[rng.choice(len(num_cups_lst))]
-            # cups = [Object(f"cup{i}", self._cup_type) for i in range(num_cups)]
+            # cups = [Object(f"cup{i}", self._cup_type)
+            #         for i in range(num_cups)]
             cups = self._cups[:num_cups]
             if CFG.coffee_simple_tasks:
                 # goal = {
@@ -742,8 +743,7 @@ class CoffeeEnv(BaseEnv):
         if CFG.coffee_fill_jug_gradually:
             return state.get(jug,
                              "current_liquid") >= self.coffee_filled_threshold
-        else:
-            return state.get(jug, "is_filled") > 0.5
+        return state.get(jug, "is_filled") > 0.5
 
     def _RobotAboveCup_holds(self, state: State,
                              objects: Sequence[Object]) -> bool:

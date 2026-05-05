@@ -11,6 +11,7 @@ import logging
 from typing import Callable, Optional, Set, Tuple
 
 import numpy as np
+import pybullet
 
 from predicators import utils
 from predicators.envs import create_new_env
@@ -18,6 +19,28 @@ from predicators.ground_truth_models import get_gt_options
 from predicators.settings import CFG
 from predicators.structs import Action, DefaultState, LowLevelTrajectory, \
     ParameterizedOption, State, _Option
+
+
+def _check_wait_termination(option: _Option, state: State, last_state: State,
+                            abstract_fn: Callable[[State], Set]) -> bool:
+    """Check if a Wait option should terminate based on target atoms or atom
+    change.
+
+    Returns True if it should terminate.
+    """
+    result = utils.check_wait_target_atoms(option, state, abstract_fn)
+    if result is True:
+        logging.info("Wait terminating: target atoms satisfied")
+        return True
+    if result is None:
+        cur_atoms = abstract_fn(state)
+        prev_atoms = abstract_fn(last_state)
+        if cur_atoms != prev_atoms:
+            logging.info(f"Wait terminating due to atom change: "
+                         f"Add: {sorted(cur_atoms - prev_atoms)} "
+                         f"Del: {sorted(prev_atoms - cur_atoms)}")
+            return True
+    return False
 
 
 def create_option_model(name: str,
@@ -115,78 +138,34 @@ class _OracleOptionModel(_OptionModelBase):
         # if it does. This is a helpful optimization for planning with
         # fine-grained options over long horizons.
         # Note: mypy complains if this is None instead of DefaultState.
-        if CFG.option_model_terminate_on_repeat:
-            last_state = DefaultState
+        last_state = DefaultState
 
-            def _terminal(s: State) -> bool:
-                nonlocal last_state
-                if option_copy.terminal(s):
-                    logging.debug("Option reached terminal state.")
-                    return True
-                if last_state is not DefaultState and last_state.allclose(s):
-                    logging.debug("Option got stuck.")
-                    raise utils.OptionExecutionFailure(
-                        f"Option '{option_copy.name}' got stuck: the "
-                        f"policy's action did not change the state. "
-                        f"This usually means the first motion phase "
-                        f"produced a no-op (e.g. IK returned current "
-                        f"joints, or finger command matched current "
-                        f"finger state).")
-                # Terminate Wait on target atoms or any atom change.
-                if (CFG.wait_option_terminate_on_atom_change
-                        and option_copy.name == "Wait"
-                        and last_state is not DefaultState
-                        and self._abstract_function is not None):
-                    result = utils.check_wait_target_atoms(
-                        option_copy, s, self._abstract_function)
-                    if result is True:
-                        logging.info(
-                            "Wait terminating: target atoms satisfied")
-                        last_state = s
-                        return True
-                    if result is None:
-                        cur_atoms = self._abstract_function(s)
-                        prev_atoms = self._abstract_function(last_state)
-                        if cur_atoms != prev_atoms:
-                            logging.info(
-                                f"Wait terminating due to atom change: "
-                                f"Add: {sorted(cur_atoms - prev_atoms)} "
-                                f"Del: {sorted(prev_atoms - cur_atoms)}")
-                            last_state = s
-                            return True
-                last_state = s
-                return False
-        else:
+        def _terminal(s: State) -> bool:
+            nonlocal last_state
+            if option_copy.terminal(s):
+                logging.debug("Option reached terminal state.")
+                return True
+            if (CFG.option_model_terminate_on_repeat
+                    and last_state is not DefaultState
+                    and last_state.allclose(s)):
+                logging.debug("Option got stuck.")
+                raise utils.OptionExecutionFailure(
+                    f"Option '{option_copy.name}' got stuck: the "
+                    f"policy's action did not change the state. "
+                    f"This usually means the first motion phase "
+                    f"produced a no-op (e.g. IK returned current "
+                    f"joints, or finger command matched current "
+                    f"finger state).")
             if (CFG.wait_option_terminate_on_atom_change
                     and option_copy.name == "Wait"
-                    and self._abstract_function is not None):
-                last_state_ref = [DefaultState]
-                abstract_fn = self._abstract_function
-
-                def _terminal(s: State) -> bool:
-                    if option_copy.terminal(s):
-                        return True
-                    if last_state_ref[0] is not DefaultState:
-                        result = utils.check_wait_target_atoms(
-                            option_copy, s, abstract_fn)
-                        if result is True:
-                            logging.info(
-                                "Wait terminating: target atoms satisfied")
-                            return True
-                        if result is None:
-                            cur_atoms = abstract_fn(s)
-                            prev_atoms = abstract_fn(last_state_ref[0])
-                            if cur_atoms != prev_atoms:
-                                logging.info(
-                                    f"Wait terminating due to atom change: "
-                                    f"Add: {sorted(cur_atoms - prev_atoms)} "
-                                    f"Del: {sorted(prev_atoms - cur_atoms)}")
-                                return True
-                    last_state_ref[0] = s
-                    return False
-            else:
-                # mypy complains without the lambda, pylint complains with it!
-                _terminal = lambda s: option_copy.terminal(s)  # pylint: disable=unnecessary-lambda
+                    and last_state is not DefaultState
+                    and self._abstract_function is not None
+                    and _check_wait_termination(option_copy, s, last_state,
+                                                self._abstract_function)):
+                logging.debug("Wait option terminating early.")
+                return True
+            last_state = s
+            return False
 
         try:
             traj = utils.run_policy_with_simulator(
@@ -195,9 +174,9 @@ class _OracleOptionModel(_OptionModelBase):
                 state,
                 _terminal,
                 max_num_steps=CFG.max_num_steps_option_rollout)
-        except utils.OptionExecutionFailure as e:
-            # If there is a failure during the execution of the option, treat
-            # this as a noop.
+        except (utils.OptionExecutionFailure, pybullet.error) as e:
+            # Treat PyBullet physics engine errors the same as planned
+            # execution failures (e.g. GUI/Metal crash on macOS).
             self.last_execution_failure = str(e)
             return state, 0
         # Note that in the case of using a PyBullet environment, the

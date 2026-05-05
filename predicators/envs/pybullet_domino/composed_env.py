@@ -102,7 +102,8 @@ class PyBulletDominoComposedEnv(PyBulletEnv):
 
     def __init__(self,
                  components: List[DominoEnvComponent],
-                 use_gui: bool = False) -> None:
+                 use_gui: bool = False,
+                 **kwargs: Any) -> None:
         """Initialize the composed domino environment.
 
         Args:
@@ -134,7 +135,7 @@ class PyBulletDominoComposedEnv(PyBulletEnv):
         # Wire up fan -> ball wind connection if both present
         # (done after PyBullet init in _store_pybullet_bodies)
 
-        super().__init__(use_gui)
+        super().__init__(use_gui, **kwargs)
 
     def _create_robot_predicates(self) -> None:
         """Create robot-specific predicates."""
@@ -277,10 +278,7 @@ class PyBulletDominoComposedEnv(PyBulletEnv):
             ids.extend(comp.get_object_ids_for_held_check())
         return ids
 
-    def _create_task_specific_objects(self, state: State) -> None:
-        """Create any task-specific objects (not used in current impl)."""
-
-    def _extract_feature(self, obj: Object, feature: str) -> float:
+    def _get_domain_specific_feature(self, obj: Object, feature: str) -> float:
         """Extract state feature for an object."""
         # Try each component
         for comp in self._components:
@@ -290,32 +288,23 @@ class PyBulletDominoComposedEnv(PyBulletEnv):
 
         raise ValueError(f"Unknown feature {feature} for object {obj}")
 
-    def _reset_custom_env_state(self, state: State) -> None:
-        """Reset environment to match the given state."""
-        # Update ball component's state reference for is_hit feature
-        if self._ball_component is not None:
-            self._ball_component.set_current_state(state)
-
-        # Reset each component
+    def _set_domain_specific_state(self, state: State) -> None:
+        """Reset each component and update ball state reference."""
         for comp in self._components:
             comp.reset_state(state)
 
-    def step(self, action: Action, render_obs: bool = False) -> State:
-        """Execute action and run component physics updates."""
-        super().step(action, render_obs=render_obs)
+        if self._ball_component is not None:
+            self._ball_component.set_current_state(state)
 
-        # Run component step functions (e.g., fan wind simulation)
+    def _domain_specific_step(self) -> None:
+        """Run component physics updates (e.g., fan wind simulation)."""
         for comp in self._components:
             comp.step()
 
-        final_state = self._get_state()
-        self._current_observation = final_state
-
         # Update ball component's state reference
         if self._ball_component is not None:
-            self._ball_component.set_current_state(final_state)
-
-        return final_state
+            state = self._get_state()
+            self._ball_component.set_current_state(state)
 
     # =========================================================================
     # PREDICATE HOLD FUNCTIONS
@@ -416,7 +405,7 @@ class PyBulletDominoComposedEnv(PyBulletEnv):
 class PyBulletDominoEnvNew(PyBulletDominoComposedEnv):
     """Backward-compatible domino environment class."""
 
-    def __init__(self, use_gui: bool = False) -> None:
+    def __init__(self, use_gui: bool = False, **kwargs: Any) -> None:
         workspace_bounds = {
             "x_lb": self.x_lb,
             "x_ub": self.x_ub,
@@ -438,7 +427,7 @@ class PyBulletDominoEnvNew(PyBulletDominoComposedEnv):
                                       num_pivots_max=max_pivots,
                                       workspace_bounds=workspace_bounds)
 
-        super().__init__(components=[domino_comp], use_gui=use_gui)
+        super().__init__(components=[domino_comp], use_gui=use_gui, **kwargs)
 
     @classmethod
     def get_name(cls) -> str:
@@ -448,7 +437,7 @@ class PyBulletDominoEnvNew(PyBulletDominoComposedEnv):
 class PyBulletDominoFanEnvNew(PyBulletDominoComposedEnv):
     """Backward-compatible domino + fan + ball environment class."""
 
-    def __init__(self, use_gui: bool = False) -> None:
+    def __init__(self, use_gui: bool = False, **kwargs: Any) -> None:
         workspace_bounds = {
             "x_lb": self.x_lb,
             "x_ub": self.x_ub,
@@ -478,7 +467,8 @@ class PyBulletDominoFanEnvNew(PyBulletDominoComposedEnv):
                                   table_height=self.table_height)
 
         super().__init__(components=[domino_comp, fan_comp, ball_comp],
-                         use_gui=use_gui)
+                         use_gui=use_gui,
+                         **kwargs)
 
     @classmethod
     def get_name(cls) -> str:
@@ -504,7 +494,7 @@ class PyBulletDominoFanEnvNew(PyBulletDominoComposedEnv):
 class PyBulletDominoFanRampEnv(PyBulletDominoComposedEnv):
     """Domino + fan + ball + ramp environment class."""
 
-    def __init__(self, use_gui: bool = False) -> None:
+    def __init__(self, use_gui: bool = False, **kwargs: Any) -> None:
         workspace_bounds = {
             "x_lb": self.x_lb,
             "x_ub": self.x_ub,
@@ -539,7 +529,8 @@ class PyBulletDominoFanRampEnv(PyBulletDominoComposedEnv):
 
         super().__init__(
             components=[domino_comp, fan_comp, ball_comp, ramp_comp],
-            use_gui=use_gui)
+            use_gui=use_gui,
+            **kwargs)
 
     @classmethod
     def get_name(cls) -> str:
@@ -565,7 +556,7 @@ class PyBulletDominoFanRampEnv(PyBulletDominoComposedEnv):
 class PyBulletDominoFanRampStairsEnv(PyBulletDominoComposedEnv):
     """Domino + fan + ball + ramp + stairs environment class."""
 
-    def __init__(self, use_gui: bool = False) -> None:
+    def __init__(self, use_gui: bool = False, **kwargs: Any) -> None:
         workspace_bounds = {
             "x_lb": self.x_lb,
             "x_ub": self.x_ub,
@@ -607,7 +598,8 @@ class PyBulletDominoFanRampStairsEnv(PyBulletDominoComposedEnv):
         super().__init__(components=[
             domino_comp, fan_comp, ball_comp, ramp_comp, stairs_comp
         ],
-                         use_gui=use_gui)
+                         use_gui=use_gui,
+                         **kwargs)
 
         # Store reference to stairs component
         self._stairs_component = stairs_comp
@@ -699,7 +691,7 @@ if __name__ == "__main__":
         print(f"{'=' * 60}")
 
         # Reset to initial state
-        env._reset_state(task.init)  # pylint: disable=protected-access
+        env._set_state(task.init)  # pylint: disable=protected-access
 
         print("\nGoal atoms:")
         for atom in task.goal:

@@ -217,7 +217,7 @@ class PyBulletCoffeeEnv(PyBulletEnv, CoffeeEnv):
     _camera_pitch: ClassVar[float]
     _camera_target: ClassVar[Pose3D]
 
-    def __init__(self, use_gui: bool = False) -> None:
+    def __init__(self, use_gui: bool = False, **kwargs: Any) -> None:
         if CFG.coffee_render_grid_world:
             # Camera parameters for grid world
             PyBulletCoffeeEnv._camera_distance = 3
@@ -238,7 +238,7 @@ class PyBulletCoffeeEnv(PyBulletEnv, CoffeeEnv):
             # PyBulletCoffeeEnv._camera_pitch = 0  # even lower
             PyBulletCoffeeEnv._camera_target = (0.75, 1.25, 0.42)
 
-        super().__init__(use_gui)
+        super().__init__(use_gui, **kwargs)
 
         # Create the cups lazily because they can change size and color.
         # self._cup_id_to_cup: Dict[int, Object] = {}
@@ -253,6 +253,11 @@ class PyBulletCoffeeEnv(PyBulletEnv, CoffeeEnv):
         self._cord_constraints: Optional[List[int]] = None
         self._machine_plugged_in_id: Optional[int] = None
         self._last_jug_liquid_level: float = 0.0
+
+        # Captured in step() before kinematics, consumed by
+        # _domain_specific_step() to detect twisting motions.
+        self._pre_step_ee_rpy: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+        self._last_action: Action = Action(np.zeros(0, dtype=np.float32))
 
     @property
     def oracle_proposed_predicates(self) -> Set[Predicate]:
@@ -314,14 +319,6 @@ class PyBulletCoffeeEnv(PyBulletEnv, CoffeeEnv):
     @classmethod
     def get_name(cls) -> str:
         return "pybullet_coffee"
-
-    def _create_task_specific_objects(self, state: State) -> None:
-        """Remove/rebuild cups, liquids, and cords so each new task can have
-        different cups and states."""
-        self._remake_jug_liquid(state)
-        self._remake_cup_liquids(state)
-        self._remake_cups(state)
-        self._remake_cord()
 
     def _remake_cups(self, state: State) -> None:
         """Re-load cup URDFs with appropriate scaling and color for each new
@@ -403,16 +400,19 @@ class PyBulletCoffeeEnv(PyBulletEnv, CoffeeEnv):
                 self._physics_client_id)
             self._plug.id = self._cord_ids[-1]
 
-    def _reset_custom_env_state(self, state: State) -> None:
-        """Handles extra coffee-specific reset steps: spawning cups from
-        scratch, adding liquid visuals, adjusting jug fill color, toggling the
-        machine button, etc.
+    def _set_domain_specific_state(self, state: State) -> None:
+        """Reset liquid visuals, cup geometry, cord, and button colors."""
+        self._remake_jug_liquid(state)
+        self._remake_cups(state)
+        for cup in state.get_objects(self._cup_type):
+            self._reset_single_object(cup, state)
+        self._remake_cup_liquids(state)
+        self._remake_cord()
+        if CFG.coffee_machine_has_plug:
+            for plug in state.get_objects(self._plug_type):
+                self._reset_single_object(plug, state)
 
-        The base `_reset_state` has already done the standard
-        position/orientation resets for objects in `_get_all_objects()`.
-        """
         # Machine button color
-        #    Check if the machine is on and the jug is in place:
         if self._MachineOn_holds(state, [self._machine]) and \
            self._JugInMachine_holds(state, [self._jug, self._machine]):
             button_color = self.button_color_on
@@ -439,7 +439,7 @@ class PyBulletCoffeeEnv(PyBulletEnv, CoffeeEnv):
                             rgbaColor=plate_color,
                             physicsClientId=self._physics_client_id)
 
-    def _extract_feature(self, obj: Object, feature: str) -> float:
+    def _get_domain_specific_feature(self, obj: Object, feature: str) -> float:
         """Extract features for creating the State object."""
         if obj.type == self._jug_type:
             if feature == "is_filled":
@@ -480,21 +480,19 @@ class PyBulletCoffeeEnv(PyBulletEnv, CoffeeEnv):
         raise ValueError(f"Unknown feature {feature} for object {obj}")
 
     def step(self, action: Action, render_obs: bool = False) -> State:
-        # Save current end-effector roll-pitch-yaw for later comparison
-        current_ee_rpy = self._pybullet_robot.forward_kinematics(
+        # Save pre-kinematics state for _domain_specific_step.
+        self._pre_step_ee_rpy = self._pybullet_robot.forward_kinematics(
             self._pybullet_robot.get_joints()).rpy
-        state = super().step(action, render_obs=render_obs)
-        # self._update_jug_liquid_position()
+        self._last_action = action
+        return super().step(action, render_obs=render_obs)
+
+    def _domain_specific_step(self) -> None:
+        state = self._get_state()
         if CFG.coffee_machine_has_plug:
             self._check_and_apply_plug_in_constraint(state)
         self._handle_machine_on_and_jug_filling(state)
         self._handle_pouring(state)
-        self._handle_twisting(state, current_ee_rpy, action)
-        # Refresh current observation
-        self._current_observation = self._get_state(_render_obs=False)
-        state = self._current_observation.copy()
-
-        return state
+        self._handle_twisting(state, self._pre_step_ee_rpy, self._last_action)
 
     def _update_jug_liquid_position(self) -> None:
         """If the jug is filled, move its liquid to match the jug's pose.
@@ -1275,7 +1273,7 @@ if __name__ == "__main__":
         env = PyBulletCoffeeEnv(use_gui=True)
         rng = np.random.default_rng(CFG.seed)
         task = env._make_tasks(1, rng)[0]  # type: ignore[attr-defined]  # pylint: disable=no-member
-        env._reset_state(task.init)
+        env._set_state(task.init)
 
         while True:
             # Robot does nothing

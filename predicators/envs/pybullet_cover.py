@@ -13,9 +13,10 @@ import pybullet as p
 
 from predicators import utils
 from predicators.envs.cover import CoverEnv
-from predicators.envs.pybullet_env import PyBulletEnv, create_pybullet_block
+from predicators.envs.pybullet_env import PyBulletEnv
 from predicators.pybullet_helpers.geometry import Pose3D, Quaternion
-from predicators.pybullet_helpers.objects import update_object
+from predicators.pybullet_helpers.objects import create_pybullet_block, \
+    update_object
 from predicators.pybullet_helpers.robots import SingleArmPyBulletRobot
 from predicators.settings import CFG
 from predicators.structs import Action, Array, EnvironmentTask, Object, State
@@ -58,10 +59,10 @@ class PyBulletCoverEnv(PyBulletEnv, CoverEnv):
                                             float]]] = [(0, 0, 0, 1.),
                                                         (1, 1, 1, 1.)]
 
-    def __init__(self, use_gui: bool = False) -> None:
-        super().__init__(use_gui)
+    def __init__(self, use_gui: bool = False, **kwargs: Any) -> None:
+        super().__init__(use_gui, **kwargs)
         # Store block/target IDs (from initialize_pybullet) so that we can
-        # reset their positions in _reset_custom_env_state().
+        # reset their positions in _set_domain_specific_state().
         self._table_id: int = -1
         # self._block_ids: list[int] = []
         # self._target_ids: list[int] = []
@@ -151,10 +152,7 @@ class PyBulletCoverEnv(PyBulletEnv, CoverEnv):
         for tgt, tgt_id in zip(self._targets, pybullet_bodies["target_ids"]):
             tgt.id = tgt_id
 
-    def _create_task_specific_objects(self, state: State) -> None:
-        """No domain-specific extra creation needed here."""
-
-    def _reset_custom_env_state(self, state: State) -> None:
+    def _set_domain_specific_state(self, state: State) -> None:
         """After the parent class has reset the robot, handle the block/target
         positions.
 
@@ -299,24 +297,13 @@ class PyBulletCoverEnv(PyBulletEnv, CoverEnv):
         return np.array([rx, ry, rz, qx, qy, qz, qw, fingers],
                         dtype=np.float32)
 
-    def _extract_feature(self, obj: Object, feature: str) -> float:
-        """Domain-specific feature extraction for blocks, targets, and the
-        (robot)."""
-        # # 1) If it's the robot
-        # if obj.type == self._robot_type:
-        #     # The parent's _get_robot_state_dict() will set x,y,z,fingers
-        #     # We can handle additional features here:
-        #     rx, ry, rz, _, _, _, _, rf = self._pybullet_robot.get_state()
-        #     if feature == "hand":
-        #         # Re-normalize the y coordinate
-        #         return (ry - self.y_lb) / (self.y_ub - self.y_lb)
-        #     elif feature == "pose_x":
-        #         return rx
-        #     elif feature == "pose_z":
-        #         return rz
-        #     raise ValueError(f"Unknown robot feature: {feature}")
+    def _get_robot_state_dict(self) -> Dict[str, float]:
+        rx, ry, rz, _, _, _, _, _rf = self._pybullet_robot.get_state()
+        hand = (ry - self.y_lb) / (self.y_ub - self.y_lb)
+        return {"hand": hand, "pose_x": rx, "pose_z": rz}
 
-        # 2) If it's a block
+    def _get_domain_specific_feature(self, obj: Object, feature: str) -> float:
+        """Domain-specific feature extraction for blocks and targets."""
         if obj.type == self._block_type:
             block_id = obj.id
             if feature == "is_block":
@@ -383,19 +370,15 @@ class PyBulletCoverEnv(PyBulletEnv, CoverEnv):
     # Step logic (unchanged except for removing direct calls to _get_state())
     # -----------------------------------------------------------------------
     def step(self, action: Action, render_obs: bool = False) -> State:
-        """Override to handle the Cover domain's 'hand region' constraint
-        before calling the parent's step()."""
-        # Check if the pick/place position satisfies the hand constraints
+        """Check hand region constraint before kinematics."""
         if not self._satisfies_hand_contraints(action):
-            # Constraint violated => no-op
             return self._current_state.copy()
+        return super().step(action, render_obs=render_obs)
 
-        # Otherwise, proceed with normal PyBullet step
-        next_state = super().step(action, render_obs=render_obs)
-
+    def _domain_specific_step(self) -> None:
         if CFG.cover_blocks_change_color_when_cover:
-            self._change_block_color_when_cover(next_state)
-        return next_state
+            state = self._get_state()
+            self._change_block_color_when_cover(state)
 
     def _change_block_color_when_cover(self, state: State) -> None:
         """If a block is now covering a target, change it's color to

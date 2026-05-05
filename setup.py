@@ -45,6 +45,7 @@ setup(
         "psutil",
         "claude-agent-sdk",
         "nest_asyncio",
+        "emcee",
     ],
     include_package_data=True,
     extras_require={

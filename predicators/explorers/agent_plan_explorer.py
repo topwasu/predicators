@@ -1,6 +1,12 @@
-"""An explorer that queries a Claude agent to generate option plans."""
+"""Agent plan explorer: Claude agent generates grounded option plans.
 
-import asyncio
+Produces fully-grounded option plans (including continuous parameters)
+and rolls them out in the real environment. Unlike
+``AgentBilevelExplorer``, it does not run backtracking refinement
+against a learned option model — the agent is expected to provide
+complete parameters itself.
+"""
+
 import logging
 from typing import Any, Dict, List, Set
 
@@ -8,7 +14,8 @@ import numpy as np
 from gym.spaces import Box
 
 from predicators import utils
-from predicators.agent_sdk.session_manager import AgentSessionManager
+from predicators.agent_sdk.session_manager import AgentSessionManager, \
+    run_query_sync
 from predicators.agent_sdk.tools import ToolContext
 from predicators.explorers.base_explorer import BaseExplorer
 from predicators.settings import CFG
@@ -16,8 +23,8 @@ from predicators.structs import Action, ExplorationStrategy, \
     ParameterizedOption, Predicate, State, Task, Type
 
 
-class AgentExplorer(BaseExplorer):
-    """Queries a Claude agent to produce option plans for exploration."""
+class AgentPlanExplorer(BaseExplorer):
+    """Queries a Claude agent to produce grounded option plans."""
 
     def __init__(self, predicates: Set[Predicate],
                  options: Set[ParameterizedOption], types: Set[Type],
@@ -31,14 +38,14 @@ class AgentExplorer(BaseExplorer):
 
     @classmethod
     def get_name(cls) -> str:
-        return "agent"
+        return "agent_plan"
 
     def _get_exploration_strategy(self, train_task_idx: int,
                                   timeout: int) -> ExplorationStrategy:
         task = self._train_tasks[train_task_idx]
         try:
             prompt = self._build_exploration_prompt(train_task_idx)
-            responses = self._query_agent_sync(prompt)
+            responses = run_query_sync(self._agent_session, prompt)
             plan_text = self._extract_option_plan_text(responses)
             if plan_text:
                 option_plan = self._parse_and_ground_plan(plan_text, task)
@@ -184,20 +191,6 @@ Output ONLY the option plan lines at the end, after any analysis."""
                 )
 
         return "\n".join(lines)
-
-    def _query_agent_sync(self, message: str) -> List[Dict[str, Any]]:
-        """Synchronous wrapper for async agent query."""
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # pylint: disable-next=import-outside-toplevel
-                import nest_asyncio  # type: ignore[import-untyped]
-                nest_asyncio.apply()
-                return loop.run_until_complete(
-                    self._agent_session.query(message))
-            return loop.run_until_complete(self._agent_session.query(message))
-        except RuntimeError:
-            return asyncio.run(self._agent_session.query(message))
 
     def _extract_option_plan_text(self, responses: List[Dict[str,
                                                              Any]]) -> str:

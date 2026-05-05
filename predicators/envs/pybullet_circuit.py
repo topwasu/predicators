@@ -104,7 +104,7 @@ class PyBulletCircuitEnv(PyBulletEnv):
     _c_battery_type = Type("c_battery",
                            ["x", "y", "z", "yaw", "pitch", "roll"])
 
-    def __init__(self, use_gui: bool = False) -> None:
+    def __init__(self, use_gui: bool = False, **kwargs: Any) -> None:
 
         # Objects
         self._robot = Object("robot", self._robot_type)
@@ -120,7 +120,7 @@ class PyBulletCircuitEnv(PyBulletEnv):
             self._c_battery1 = Object("c_battery1", self._c_battery_type)
             self._c_battery2 = Object("c_battery2", self._c_battery_type)
 
-        super().__init__(use_gui)
+        super().__init__(use_gui, **kwargs)
 
         # Predicates
         self._Holding = Predicate("Holding",
@@ -297,7 +297,7 @@ class PyBulletCircuitEnv(PyBulletEnv):
         """Return IDs of wires (assuming the robot can pick them up)."""
         return [self._wire1.id, self._wire2.id]
 
-    def _extract_feature(self, obj: Object, feature: str) -> float:
+    def _get_domain_specific_feature(self, obj: Object, feature: str) -> float:
         """Extract features for creating the State object."""
         if obj.type == self._light_type and feature == "is_on":
             return int(self._is_bulb_on(obj.id))
@@ -305,10 +305,10 @@ class PyBulletCircuitEnv(PyBulletEnv):
             return int(self._is_switch_on())
         raise ValueError(f"Unknown feature {feature} for object {obj}")
 
-    def _create_task_specific_objects(self, state: State) -> None:
-        pass
-
-    def _reset_custom_env_state(self, state: State) -> None:
+    def _set_domain_specific_state(self, state: State) -> None:
+        """Set switch position and bulb on/off state."""
+        is_switch_on = state.get(self._battery, "is_on")
+        self._set_switch_on(self._battery, is_switch_on)
 
         is_light_on = state.get(self._light, "is_on")
         if is_light_on:
@@ -316,29 +316,23 @@ class PyBulletCircuitEnv(PyBulletEnv):
         else:
             self._turn_bulb_off()
 
-        is_switch_on = state.get(self._battery, "is_on")
-        self._set_switch_on(self._battery, is_switch_on)
-
-    def step(self, action: Action, render_obs: bool = False) -> State:
-        """Process a single action step.
-
-        If the battery is connected to the light, turn the bulb on.
-        """
-        next_state = super().step(action, render_obs=render_obs)
+    def _domain_specific_step(self) -> None:
+        """If the battery is connected to the light, turn the bulb on."""
+        state = self._get_state()
 
         # Check basic conditions for turning on the bulb
-        switch_on = self._SwitchedOn_holds(next_state, [self._battery])
+        switch_on = self._SwitchedOn_holds(state, [self._battery])
         basic_conditions = switch_on and (
-            CFG.circuit_light_doesnt_need_battery or self._CircuitClosed_holds(
-                next_state, [self._light, self._battery]))
+            CFG.circuit_light_doesnt_need_battery
+            or self._CircuitClosed_holds(state, [self._light, self._battery]))
 
         # Additional condition: if not using battery_in_box mode,
         # both C batteries must be in the battery box
         if not CFG.circuit_battery_in_box and self._c_battery1 is not None \
                 and self._c_battery2 is not None:
             both_batteries_in_box = (
-                self._InBatteryBox_holds(next_state, [self._c_battery1])
-                and self._InBatteryBox_holds(next_state, [self._c_battery2]))
+                self._InBatteryBox_holds(state, [self._c_battery1])
+                and self._InBatteryBox_holds(state, [self._c_battery2]))
             can_turn_on = basic_conditions and both_batteries_in_box
         else:
             can_turn_on = basic_conditions
@@ -348,13 +342,8 @@ class PyBulletCircuitEnv(PyBulletEnv):
         else:
             self._turn_bulb_off()
 
-        final_state = self._get_state()
-
         # Draw debug lines to visualize battery box region
-        self._draw_battery_box_debug_lines(final_state)
-
-        self._current_observation = final_state
-        return final_state
+        self._draw_battery_box_debug_lines(state)
 
     # -------------------------------------------------------------------------
     # Predicates
@@ -775,7 +764,7 @@ if __name__ == "__main__":
         CFG.num_train_tasks = 1
         env = PyBulletCircuitEnv(use_gui=True)
         task = env._generate_train_tasks()[0]
-        env._reset_state(task.init)
+        env._set_state(task.init)
 
         while True:
             action = Action(

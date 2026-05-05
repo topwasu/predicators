@@ -16,9 +16,10 @@ import numpy as np
 import pybullet as p
 
 from predicators import utils
-from predicators.envs.pybullet_env import PyBulletEnv, create_pybullet_block
+from predicators.envs.pybullet_env import PyBulletEnv
 from predicators.pybullet_helpers.geometry import Pose3D, Quaternion
-from predicators.pybullet_helpers.objects import create_object
+from predicators.pybullet_helpers.objects import create_object, \
+    create_pybullet_block
 from predicators.pybullet_helpers.robots import SingleArmPyBulletRobot
 from predicators.settings import CFG
 from predicators.structs import Action, EnvironmentTask, GroundAtom, Object, \
@@ -85,7 +86,7 @@ class PyBulletMagicBinEnv(PyBulletEnv):
                         sim_features=["id", "joint_id", "joint_scale"])
     _bin_type = Type("bin", ["x", "y", "z", "rot"])
 
-    def __init__(self, use_gui: bool = False) -> None:
+    def __init__(self, use_gui: bool = False, **kwargs: Any) -> None:
         # Objects
         self._robot = Object("robot", self._robot_type)
         self._blocks: List[Object] = [
@@ -95,7 +96,7 @@ class PyBulletMagicBinEnv(PyBulletEnv):
         self._switch = Object("switch", self._switch_type)
         self._bin = Object("bin", self._bin_type)
 
-        super().__init__(use_gui)
+        super().__init__(use_gui, **kwargs)
 
         # Predicates
         self._HandEmpty = Predicate("HandEmpty", [self._robot_type],
@@ -235,7 +236,7 @@ class PyBulletMagicBinEnv(PyBulletEnv):
         """Return IDs of objects that can be held (blocks)."""
         return [block.id for block in self._blocks]
 
-    def _extract_feature(self, obj: Object, feature: str) -> float:
+    def _get_domain_specific_feature(self, obj: Object, feature: str) -> float:
         """Extract features for creating the State object."""
         if obj.type == self._switch_type and feature == "is_on":
             return float(self._is_switch_on())
@@ -246,10 +247,7 @@ class PyBulletMagicBinEnv(PyBulletEnv):
             return float(pos[0] > 5.0)  # Out of view if x > 5
         raise ValueError(f"Unknown feature {feature} for object {obj}")
 
-    def _create_task_specific_objects(self, state: State) -> None:
-        del state  # Unused
-
-    def _reset_custom_env_state(self, state: State) -> None:
+    def _set_domain_specific_state(self, state: State) -> None:
         """Reset environment state from a State object."""
         # Set switch state
         switch_on = state.get(self._switch, "is_on") > 0.5
@@ -267,12 +265,8 @@ class PyBulletMagicBinEnv(PyBulletEnv):
                     self._default_orn,
                     physicsClientId=self._physics_client_id)
 
-    def step(self, action: Action, render_obs: bool = False) -> State:
-        """Process a single action step."""
-        # Execute the action
-        super().step(action, render_obs=render_obs)
-
-        # Check magic bin logic: if switch is on and block is in bin, vanish it
+    def _domain_specific_step(self) -> None:
+        """If switch is on and block is in bin, vanish it."""
         if self._is_switch_on():
             bin_pos, _ = p.getBasePositionAndOrientation(
                 self._bin.id, physicsClientId=self._physics_client_id)
@@ -302,11 +296,6 @@ class PyBulletMagicBinEnv(PyBulletEnv):
                         block.id, [oov_x, oov_y, idx * self.block_size],
                         self._default_orn,
                         physicsClientId=self._physics_client_id)
-
-        # Get updated state
-        final_state = self._get_state()
-        self._current_observation = final_state
-        return final_state
 
     # -------------------------------------------------------------------------
     # Switch helpers
@@ -481,7 +470,7 @@ if __name__ == "__main__":
     CFG.num_train_tasks = 1
     env = PyBulletMagicBinEnv(use_gui=True)
     task = env._generate_train_tasks()[0]  # pylint: disable=protected-access
-    env._reset_state(task.init)  # pylint: disable=protected-access
+    env._set_state(task.init)  # pylint: disable=protected-access
 
     print("PyBullet Magic Bin Environment Test")
     print("Blocks should vanish when in bin with switch ON.")

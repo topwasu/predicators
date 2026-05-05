@@ -15,8 +15,9 @@ from typing import Any, ClassVar, Dict, List, Optional, Sequence, Set, Tuple, \
 import numpy as np
 import pybullet as p
 
-from predicators.envs.pybullet_env import PyBulletEnv, create_pybullet_block
+from predicators.envs.pybullet_env import PyBulletEnv
 from predicators.pybullet_helpers.geometry import Pose3D, Quaternion
+from predicators.pybullet_helpers.objects import create_pybullet_block
 from predicators.pybullet_helpers.robots import SingleArmPyBulletRobot
 from predicators.settings import CFG
 from predicators.structs import Action, Array, ConceptPredicate, \
@@ -87,7 +88,7 @@ class PyBulletBalanceEnv(PyBulletEnv):
     _num_blocks_train = CFG.balance_num_blocks_train
     _num_blocks_test = CFG.balance_num_blocks_test
 
-    def __init__(self, use_gui: bool = False) -> None:
+    def __init__(self, use_gui: bool = False, **kwargs: Any) -> None:
         # Types
         # bbox_features = ["bbox_left", "bbox_right",
         #                  "bbox_upper", "bbox_lower"]
@@ -115,7 +116,7 @@ class PyBulletBalanceEnv(PyBulletEnv):
 
         self._prev_diff = 0
 
-        super().__init__(use_gui)
+        super().__init__(use_gui, **kwargs)
 
         # Predicates
         self._DirectlyOn = Predicate(
@@ -320,10 +321,7 @@ class PyBulletBalanceEnv(PyBulletEnv):
 
     # -------------------------------------------------------------------------
     # State Management: Get, (Re)Set, Step
-    def _create_task_specific_objects(self, state: State) -> None:
-        pass
-
-    def _extract_feature(self, obj: Object, feature: str) -> float:
+    def _get_domain_specific_feature(self, obj: Object, feature: str) -> float:
         """Extract features for creating the State object."""
         if obj.type == self._block_type:
             visual_data = p.getVisualShapeData(
@@ -348,14 +346,9 @@ class PyBulletBalanceEnv(PyBulletEnv):
 
         raise ValueError(f"Unknown feature {feature} for object {obj}")
 
-    def step(  # pylint: disable=redefined-outer-name
-            self,
-            action: Action,
-            render_obs: bool = False) -> State:
-        state = super().step(action, render_obs=render_obs)
-
+    def _domain_specific_step(self) -> None:
+        state = self._get_state()
         self._update_balance_beam(state)
-
         # Turn machine on
         if self._PressingButton_holds(state, [self._robot, self._machine]):
             if self._Balanced_holds(state, [self._plate1, self._plate3]):
@@ -363,39 +356,13 @@ class PyBulletBalanceEnv(PyBulletEnv):
                                     -1,
                                     rgbaColor=self._button_color_on,
                                     physicsClientId=self._physics_client_id)
-            self._current_observation = self._get_state()
-            state = self._current_observation.copy()
 
-        return state
-
-    def _reset_custom_env_state(self, state: State) -> None:
-        """Replace the old `_reset_state` environment-specific logic.
-
-        The base `_reset_state` has already handled standard features
-        for objects that appear in _get_all_objects(), so here we just
-        do custom domain-specific tasks: setting plates/blocks if we
-        aren't letting the base class handle them, updating button
-        color, and running the beam-balancing update.
-        """
-        # block objs in the state
+    def _set_domain_specific_state(self, state: State) -> None:
+        """Set block placement, balance beam, block colors, ID mapping, and
+        button color."""
         block_objs = state.get_objects(self._block_type)
-        self._block_id_to_block.clear()
 
-        # Suppose we want to manually update each block's color or remove them
-        # if not used. For example:
-        for i, block_obj in enumerate(block_objs):
-            self._block_id_to_block[block_obj.id] = block_obj
-            # Manually set color if needed:
-            r = state.get(block_obj, "color_r")
-            g = state.get(block_obj, "color_g")
-            b = state.get(block_obj, "color_b")
-            p.changeVisualShape(block_obj.id,
-                                linkIndex=-1,
-                                rgbaColor=(r, g, b, 1.0),
-                                physicsClientId=self._physics_client_id)
-
-        # For blocks beyond the number actually in the state, put them out of
-        # view:
+        # Put unused blocks out of view
         h = self._block_size
         oov_x, oov_y = self._out_of_view_xy
         for i in range(len(block_objs), len(self._blocks)):
@@ -404,10 +371,22 @@ class PyBulletBalanceEnv(PyBulletEnv):
                 self._default_orn,
                 physicsClientId=self._physics_client_id)
 
-        self._prev_diff = 0  # reset difference
+        self._prev_diff = 0
         self._update_balance_beam(state)
 
-        # Update button color for whether the machine is on
+        self._block_id_to_block.clear()
+
+        for i, block_obj in enumerate(block_objs):
+            self._block_id_to_block[block_obj.id] = block_obj
+            r = state.get(block_obj, "color_r")
+            g = state.get(block_obj, "color_g")
+            b = state.get(block_obj, "color_b")
+            p.changeVisualShape(block_obj.id,
+                                linkIndex=-1,
+                                rgbaColor=(r, g, b, 1.0),
+                                physicsClientId=self._physics_client_id)
+
+        # Update button color
         if self._MachineOn_holds(state, [self._machine, self._robot]):
             button_color = self._button_color_on
         else:
@@ -961,7 +940,7 @@ if __name__ == "__main__":
     CFG.num_test_tasks = 1
     env = PyBulletBalanceEnv(use_gui=True)
     task = env._generate_test_tasks()[0]  # pylint: disable=protected-access
-    env._reset_state(task.init)  # pylint: disable=protected-access
+    env._set_state(task.init)  # pylint: disable=protected-access
 
     while True:
         # Robot does nothing

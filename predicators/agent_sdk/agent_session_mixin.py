@@ -8,7 +8,8 @@ import asyncio
 import os
 from typing import Any, Dict, List, Optional, Set, Union
 
-from predicators.agent_sdk.session_manager import AgentSessionManager
+from predicators.agent_sdk.session_manager import AgentSessionManager, \
+    run_query_sync
 from predicators.agent_sdk.tools import ToolContext, create_mcp_tools, \
     get_allowed_tool_list
 from predicators.explorers import create_explorer
@@ -127,12 +128,18 @@ class AgentSessionMixin:
                 tools=tools,
             )
 
+            extra_names = [
+                getattr(t, "name", "")
+                for t in self._tool_context.extra_mcp_tools
+            ]
             self._agent_session = AgentSessionManager(
                 system_prompt=self._get_agent_system_prompt(),
                 mcp_server=mcp_server,
                 log_dir=self._get_log_dir(),
                 model_name=CFG.agent_sdk_model_name,
-                allowed_tools=get_allowed_tool_list(tool_names),
+                allowed_tools=get_allowed_tool_list(tool_names,
+                                                    extra_names=extra_names
+                                                    or None),
             )
 
         if self._agent_session_id is not None:
@@ -179,26 +186,18 @@ class AgentSessionMixin:
         """Synchronous wrapper for async agent query."""
         self._ensure_agent_session()
         assert self._agent_session is not None
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                import nest_asyncio  # type: ignore[import-untyped,import-not-found]  # pylint: disable=import-outside-toplevel
-                nest_asyncio.apply()
-                return loop.run_until_complete(
-                    self._agent_session.query(message))
-            return loop.run_until_complete(self._agent_session.query(message))
-        except RuntimeError:
-            return asyncio.run(self._agent_session.query(message))
+        return run_query_sync(self._agent_session, message)
 
     def _create_agent_explorer(
         self,
         predicates: Set[Predicate],
         options: Set[ParameterizedOption],
+        name: str = "agent_plan",
     ) -> BaseExplorer:
         """Create an agent explorer with tool_context and agent_session."""
         self._ensure_agent_session()
         return create_explorer(
-            "agent",
+            name,
             predicates,
             options,
             self._types,  # type: ignore[attr-defined]

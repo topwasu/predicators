@@ -5,9 +5,9 @@ import numpy as np
 import pybullet as p
 
 from predicators import utils
-from predicators.envs.pybullet_env import PyBulletEnv, create_pybullet_block
+from predicators.envs.pybullet_env import PyBulletEnv
 from predicators.pybullet_helpers.objects import create_object, \
-    sample_collision_free_2d_positions, update_object
+    create_pybullet_block, sample_collision_free_2d_positions, update_object
 from predicators.pybullet_helpers.robots import SingleArmPyBulletRobot
 from predicators.settings import CFG
 from predicators.structs import Action, EnvironmentTask, GroundAtom, Object, \
@@ -91,7 +91,8 @@ class PyBulletAntsEnv(PyBulletEnv):
 
     def __init__(self,
                  use_gui: bool = False,
-                 debug_layout: bool = True) -> None:
+                 debug_layout: bool = True,
+                 **kwargs: Any) -> None:
         # Create single robot
         self._robot = Object("robot", self._robot_type)
 
@@ -113,7 +114,7 @@ class PyBulletAntsEnv(PyBulletEnv):
         if CFG.ants_ants_attracted_to_points:
             self._ants_to_xy: Dict[Object, Tuple[float, float]] = {}
 
-        super().__init__(use_gui)
+        super().__init__(use_gui, **kwargs)
         self._debug_layout = debug_layout
 
         # Define predicates if needed (some are placeholders)
@@ -174,7 +175,7 @@ class PyBulletAntsEnv(PyBulletEnv):
         food_ids = []
         for _ in range(cls.num_food):
             fid = create_pybullet_block(
-                color=(0.5, 0.5, 0.5, 1.0),  # We’ll override color later
+                color=(0.5, 0.5, 0.5, 1.0),  # We'll override color later
                 half_extents=cls.food_half_extents,
                 mass=cls.food_mass,
                 friction=0.5,
@@ -215,10 +216,7 @@ class PyBulletAntsEnv(PyBulletEnv):
         # If we support robot picking up food blocks, return those IDs.
         return [f.id for f in self._blocks]
 
-    def _create_task_specific_objects(self, state: State) -> None:
-        pass
-
-    def _extract_feature(self, obj: Object, feature: str) -> float:
+    def _get_domain_specific_feature(self, obj: Object, feature: str) -> float:
         """Extract features for creating the State object."""
         if obj.type == self._food_type:
             if feature == "attractive":
@@ -229,7 +227,21 @@ class PyBulletAntsEnv(PyBulletEnv):
 
         raise ValueError(f"Unknown feature {feature} for object {obj}")
 
-    def _reset_custom_env_state(self, state: State) -> None:
+    def _set_domain_specific_state(self, state: State) -> None:
+        """Hide unused objects, set attraction points, food colors, and ant
+        target references."""
+        oov_x, oov_y = self._out_of_view_xy
+        block_objs = state.get_objects(self._food_type)
+        for i in range(len(block_objs), len(self._blocks)):
+            update_object(self._blocks[i].id,
+                          position=(oov_x, oov_y, self.z_lb),
+                          physics_client_id=self._physics_client_id)
+
+        ant_objs = state.get_objects(self._ant_type)
+        for i in range(len(ant_objs), len(self._ants)):
+            update_object(self._ants[i].id,
+                          position=(oov_x, oov_y, self.z_lb),
+                          physics_client_id=self._physics_client_id)
 
         if CFG.ants_ants_attracted_to_points:
             self._ant_to_xy = {}  # type: ignore[no-redef]
@@ -238,22 +250,6 @@ class PyBulletAntsEnv(PyBulletEnv):
                     self.one_third_x, self.two_third_x),
                                              self._train_rng.uniform(
                                                  self.y_lb, self.y_ub))
-
-        # Hide irrelevant objects
-        oov_x, oov_y = self._out_of_view_xy
-        block_objs = state.get_objects(self._food_type)
-        for i in range(len(block_objs), len(self._blocks)):
-            # Hide the remaining blocks
-            update_object(self._blocks[i].id,
-                          position=(oov_x, oov_y, self.z_lb),
-                          physics_client_id=self._physics_client_id)
-
-        ant_objs = state.get_objects(self._ant_type)
-        for i in range(len(ant_objs), len(self._ants)):
-            # Hide the remaining ants
-            update_object(self._ants[i].id,
-                          position=(oov_x, oov_y, self.z_lb),
-                          physics_client_id=self._physics_client_id)
 
         for food in state.get_objects(self._food_type):
             r = state.get(food, "r")
@@ -265,7 +261,6 @@ class PyBulletAntsEnv(PyBulletEnv):
                           physics_client_id=self._physics_client_id)
             food.attractive = attractive
 
-        # Set ant's attractive food
         for ant_obj in state.get_objects(self._ant_type):
             food_id = state.get(ant_obj, "target_food")
             for food_obj in state.get_objects(self._food_type):
@@ -273,25 +268,10 @@ class PyBulletAntsEnv(PyBulletEnv):
                     ant_obj.target_food = food_obj
                     break
 
-    def step(  # pylint: disable=redefined-outer-name
-            self,
-            action: Action,
-            render_obs: bool = False) -> State:
-        """Override to (1) do usual robot step, (2) move ants toward attracted
-        food with noise, and then (3) return the final state."""
-        # Step the robot normally
-        next_state = super().step(action, render_obs=render_obs)
-
-        # Move ants. For each ant, find a target food
-        # object that is “attractive.” If there’s more
-        # than one attractive block, pick the one it’s
-        # “assigned” to, or the first in the list. Then
-        # move a small step toward it with noise.
-        self._update_ant_positions(next_state)
-
-        final_state = self._get_state()
-        self._current_observation = final_state
-        return final_state
+    def _domain_specific_step(self) -> None:
+        """Move ants toward attracted food with noise."""
+        state = self._get_state()
+        self._update_ant_positions(state)
 
     def _update_ant_positions(self, state: State) -> None:
         """For each ant, move it a small step toward its assigned attractive
@@ -304,7 +284,7 @@ class PyBulletAntsEnv(PyBulletEnv):
             if CFG.ants_ants_attracted_to_points:
                 fx, fy = self._ants_to_xy[ant_obj]
             else:
-                # Retrieve this ant’s assigned food
+                # Retrieve this ant's assigned food
                 target_food_obj = None
                 for food_obj in state.get_objects(self._food_type):
                     if food_obj.id == state.get(ant_obj, "target_food"):
@@ -533,7 +513,7 @@ if __name__ == "__main__":
     env = PyBulletAntsEnv(use_gui=True)
     rng = np.random.default_rng(CFG.seed)
     task = env._make_tasks(1, rng)[0]  # pylint: disable=protected-access
-    env._reset_state(task.init)  # pylint: disable=protected-access
+    env._set_state(task.init)  # pylint: disable=protected-access
 
     while True:
         # Robot does nothing

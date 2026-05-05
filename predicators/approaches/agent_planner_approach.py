@@ -1,6 +1,6 @@
 """Agent planner approach: fixed-vocabulary open-loop planning.
 
-Combines online trajectory collection (via AgentExplorer) with open-loop
+Combines online trajectory collection (via AgentPlanExplorer) with open-loop
 option plan generation (via Claude Agent SDK). No predicate/process/type
 invention — just stores trajectories and generates plans.
 
@@ -8,7 +8,7 @@ Example command:
     python predicators/main.py --env pybullet_domino \
         --approach agent_planner --seed 0 \
         --num_train_tasks 1 --num_test_tasks 1 \
-        --num_online_learning_cycles 1 --explorer agent
+        --num_online_learning_cycles 1 --explorer agent_plan
 """
 import datetime
 import inspect as _inspect
@@ -22,8 +22,8 @@ import numpy as np
 from gym.spaces import Box
 
 from predicators import utils
+from predicators.agent_sdk.agent_session_mixin import AgentSessionMixin
 from predicators.approaches import ApproachFailure
-from predicators.approaches.agent_session_mixin import AgentSessionMixin
 from predicators.approaches.base_approach import BaseApproach
 from predicators.explorers import create_explorer
 from predicators.explorers.base_explorer import BaseExplorer
@@ -37,7 +37,7 @@ from predicators.structs import Action, Dataset, GroundAtom, \
 class AgentPlannerApproach(AgentSessionMixin, BaseApproach):
     """Fixed-vocabulary open-loop planning via Claude Agent SDK.
 
-    - Collects trajectories online using AgentExplorer
+    - Collects trajectories online using AgentPlanExplorer
     - At solve time, queries the agent for an option plan
     - No predicate/process/type invention
     """
@@ -60,13 +60,13 @@ class AgentPlannerApproach(AgentSessionMixin, BaseApproach):
         else:
             self._option_model = create_option_model(CFG.option_model_name)
         # Let the option model terminate Wait on atom change using the
-        # approach's predicates (which may include invented ones).
+        # approach's predicates (which may include invented ones). Looked
+        # up lazily so the lambda picks up predicates invented after
+        # __init__.
         if CFG.wait_option_terminate_on_atom_change:
-            preds = self._get_all_predicates()
             cast(  # pylint: disable=protected-access
-                Any, self._option_model
-            )._abstract_function = \
-                lambda s, _p=preds: utils.abstract(s, _p)
+                Any, self._option_model)._abstract_function = (
+                    lambda s: utils.abstract(s, self._get_all_predicates()))
         self._online_learning_cycle = 0
         self._requests_train_task_idxs: Optional[List[int]] = None
         self._run_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -705,10 +705,13 @@ Output ONLY the option plan lines at the end, after any analysis."""
 
     def _create_explorer(self) -> BaseExplorer:
         """Create explorer for interaction requests."""
-        if CFG.explorer == "agent":
+        if CFG.explorer in ("agent_plan", "agent_bilevel"):
             self._sync_tool_context()
-            return self._create_agent_explorer(self._get_all_predicates(),
-                                               self._get_all_options())
+            return self._create_agent_explorer(
+                self._get_all_predicates(),
+                self._get_all_options(),
+                name=CFG.explorer,
+            )
         return create_explorer(
             CFG.explorer,
             self._get_all_predicates(),

@@ -13,10 +13,10 @@ import numpy as np
 import pybullet as p
 
 from predicators import utils
-from predicators.envs.pybullet_env import PyBulletEnv, create_pybullet_block
+from predicators.envs.pybullet_env import PyBulletEnv
 from predicators.pybullet_helpers.geometry import Pose3D, Quaternion
 from predicators.pybullet_helpers.objects import create_object, \
-    sample_collision_free_2d_positions, update_object
+    create_pybullet_block, sample_collision_free_2d_positions, update_object
 from predicators.settings import CFG
 from predicators.structs import Action, EnvironmentTask, GroundAtom, Object, \
     Predicate, State, Type
@@ -120,7 +120,7 @@ class PyBulletFloatEnv(PyBulletEnv):
     _block_type = Type("block", ["x", "y", "z", "in_water", "is_held"],
                        sim_features=["id", "is_light"])
 
-    def __init__(self, use_gui: bool = False) -> None:
+    def __init__(self, use_gui: bool = False, **kwargs: Any) -> None:
         self._robot = Object("robot", self._robot_type)
         self._vessel = Object("vessel", self._vessel_type)
         self._block0 = Object("block0", self._block_type)
@@ -128,7 +128,7 @@ class PyBulletFloatEnv(PyBulletEnv):
         self._block2 = Object("block2", self._block_type)
         self._blocks = [self._block0, self._block1, self._block2]
 
-        super().__init__(use_gui)
+        super().__init__(use_gui, **kwargs)
 
         self._InWater = Predicate("InWater", [self._block_type],
                                   self._InWater_holds)
@@ -229,10 +229,7 @@ class PyBulletFloatEnv(PyBulletEnv):
     def _get_object_ids_for_held_check(self) -> List[int]:
         return [block_obj.id for block_obj in self._blocks]
 
-    def _create_task_specific_objects(self, state: State) -> None:
-        pass
-
-    def _extract_feature(self, obj: Object, feature: str) -> float:
+    def _get_domain_specific_feature(self, obj: Object, feature: str) -> float:
         """Extract features for creating the State object."""
         if obj.type == self._block_type:
             # if feature == "is_light":
@@ -255,10 +252,11 @@ class PyBulletFloatEnv(PyBulletEnv):
                 return self._current_water_height
         raise ValueError(f"Unknown feature {feature} for object {obj}")
 
-    def _reset_custom_env_state(self, state: State) -> None:
-
-        # Initialize water level
+    def _set_domain_specific_state(self, state: State) -> None:
+        """Set water height and redraw water bodies, block colors, and
+        displacement tracking."""
         self._current_water_height = state.get(self._vessel, "water_height")
+
         # Clear old water
         for wid in self._water_ids.values():
             if wid is not None:
@@ -267,17 +265,9 @@ class PyBulletFloatEnv(PyBulletEnv):
 
         # Reset blocks
         for blk in self._blocks:
-            # Set block's color based on is_light
-            # update_object(blk.id,
-            #               color=PyBulletFloatEnv.block_color_light \
-            #                 if state.get(blk, "is_light") > 0.5
-            #                 else PyBulletFloatEnv.block_color_heavy,
-            #               physics_client_id=self._physics_client_id)
-            # Set block's color randomly
             update_object(blk.id,
                           color=self._train_rng.choice(self._obj_colors),
                           physics_client_id=self._physics_client_id)
-            # Re-initialize displacing to False
             self._block_is_displacing[blk] = False
 
         # Re-draw water
@@ -293,21 +283,13 @@ class PyBulletFloatEnv(PyBulletEnv):
                           color=[0.5, 0.5, 1, 0.5],
                           physics_client_id=self._physics_client_id)
 
-    def step(  # pylint: disable=redefined-outer-name
-            self,
-            action: Action,
-            render_obs: bool = False) -> State:
-        next_state = super().step(action, render_obs=render_obs)
-        # Check if blocks entering/exiting water changed its level
-        changed = self._update_water_level_if_needed(next_state)
+    def _domain_specific_step(self) -> None:
+        """Update water level and float light blocks."""
+        state = self._get_state()
+        changed = self._update_water_level_if_needed(state)
         if changed:
             self._create_or_update_water(force_redraw=True)
-        # Keep light blocks floating on water surface
-        self._float_light_blocks(next_state)
-
-        final_state = self._get_state()
-        self._current_observation = final_state
-        return final_state
+        self._float_light_blocks(state)
 
     def _float_light_blocks(self, state: State) -> None:
         """Force each light, unheld block in a container compartment to float
@@ -617,7 +599,7 @@ if __name__ == "__main__":
     CFG.pybullet_sim_steps_per_action = 1
     env = PyBulletFloatEnv(use_gui=True)
     task = env._make_tasks(1, np.random.default_rng(0))[0]  # pylint: disable=protected-access
-    env._reset_state(task.init)  # pylint: disable=protected-access
+    env._set_state(task.init)  # pylint: disable=protected-access
 
     while True:
         action = Action(np.array(env._pybullet_robot.initial_joint_positions))  # pylint: disable=protected-access

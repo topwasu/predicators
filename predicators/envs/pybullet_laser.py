@@ -121,7 +121,7 @@ class PyBulletLaserEnv(PyBulletEnv):
                         ["x", "y", "z", "rot", "split_mirror", "is_held"])
     _target_type = Type("target", ["x", "y", "z", "rot", "is_hit"])
 
-    def __init__(self, use_gui: bool = False) -> None:
+    def __init__(self, use_gui: bool = False, **kwargs: Any) -> None:
         # Create environment objects (logic-level)
         self._robot = Object("robot", self._robot_type)
         self._station = Object("station", self._station_type)
@@ -140,7 +140,7 @@ class PyBulletLaserEnv(PyBulletEnv):
         ]
 
         # Initialize PyBullet
-        super().__init__(use_gui=use_gui)
+        super().__init__(use_gui=use_gui, **kwargs)
 
         # Define predicates
         # Example: "StationOn" checks whether the station is toggled on
@@ -282,14 +282,11 @@ class PyBulletLaserEnv(PyBulletEnv):
     # -------------------------------------------------------------------------
     # State Reading/Writing
     # -------------------------------------------------------------------------
-    def _create_task_specific_objects(self, state: State) -> None:
-        pass
-
     def _get_object_ids_for_held_check(self) -> List[int]:
         """Return IDs of wires (assuming the robot can pick them up)."""
         return [m.id for m in self._normal_mirrors + self._split_mirrors]
 
-    def _extract_feature(self, obj: Object, feature: str) -> float:
+    def _get_domain_specific_feature(self, obj: Object, feature: str) -> float:
         """Extract features for creating the State object."""
         if obj.type == self._station_type:
             if feature == "is_on":
@@ -302,17 +299,10 @@ class PyBulletLaserEnv(PyBulletEnv):
                 return 1.0 if self._is_target_hit(obj) else 0.0
         raise ValueError(f"Unknown feature {feature} for object {obj}")
 
-    def _reset_custom_env_state(self, state: State) -> None:
+    def _set_domain_specific_state(self, state: State) -> None:
+        """Set target/mirror positioning, station switch, and remove old laser
+        beams."""
         oov_x, oov_y = self._out_of_view_xy
-
-        lasers_copy = _laser_ids.copy()
-        for beam_id, creation_time, client_id in lasers_copy:
-            p.removeBody(beam_id, physicsClientId=client_id)
-            # Remove the beam from the list
-            _laser_ids.remove((beam_id, creation_time, client_id))
-            logging.debug(f"[reset] removing beam_id: {beam_id} "
-                          f"in sim{client_id}, remaining beams "
-                          f"{[bid for bid, _, _ in _laser_ids]}")
 
         # Move targets out of view if needed
         target_objs = state.get_objects(self._target_type)
@@ -344,27 +334,29 @@ class PyBulletLaserEnv(PyBulletEnv):
         switch_on = state.get(self._station, "is_on") > 0.5
         self._set_station_powered_on(switch_on)
 
+        lasers_copy = _laser_ids.copy()
+        for beam_id, creation_time, client_id in lasers_copy:
+            p.removeBody(beam_id, physicsClientId=client_id)
+            _laser_ids.remove((beam_id, creation_time, client_id))
+            logging.debug(f"[reset] removing beam_id: {beam_id} "
+                          f"in sim{client_id}, remaining beams "
+                          f"{[bid for bid, _, _ in _laser_ids]}")
+
     # -------------------------------------------------------------------------
     # Step
     # -------------------------------------------------------------------------
-    def step(self, action: Action, render_obs: bool = False) -> State:
-        next_state = super().step(action, render_obs=render_obs)
-
-        # After any motion, we simulate the laser
-        self._simulate_laser(next_state)
+    def _domain_specific_step(self) -> None:
+        state = self._get_state()
+        self._simulate_laser(state)
 
         lasers_copy = _laser_ids.copy()
         for beam_id, creation_time, client_id in lasers_copy:
             if time.time() - creation_time > self._laser_life_time:
                 p.removeBody(beam_id, physicsClientId=client_id)
-                # Remove the beam from the list
                 _laser_ids.remove((beam_id, creation_time, client_id))
                 logging.debug(f"[step] removing beam_id: {beam_id} "
                               f"in sim{client_id}, remaining beams "
                               f"{[bid for bid, _, _ in _laser_ids]}")
-        final_state = self._get_state()
-        self._current_observation = final_state
-        return final_state
 
     # -------------------------------------------------------------------------
     # Laser Simulation
@@ -822,7 +814,7 @@ if __name__ == "__main__":
     CFG.laser_zero_reflection_angle = True
     env = PyBulletLaserEnv(use_gui=True)
     task = env._make_tasks(1, np.random.default_rng(CFG.seed), True)[0]  # pylint: disable=protected-access
-    env._reset_state(task.init)  # pylint: disable=protected-access
+    env._set_state(task.init)  # pylint: disable=protected-access
 
     while True:
         # Robot does nothing

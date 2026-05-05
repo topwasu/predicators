@@ -6,10 +6,10 @@ import numpy as np
 import pybullet as p
 
 from predicators import utils
-from predicators.envs.pybullet_env import PyBulletEnv, create_pybullet_block, \
-    create_pybullet_sphere
+from predicators.envs.pybullet_env import PyBulletEnv
 from predicators.pybullet_helpers.geometry import Pose3D, Quaternion
-from predicators.pybullet_helpers.objects import create_object, update_object
+from predicators.pybullet_helpers.objects import create_object, \
+    create_pybullet_block, create_pybullet_sphere, update_object
 from predicators.pybullet_helpers.robots import SingleArmPyBulletRobot
 from predicators.settings import CFG
 from predicators.structs import Action, EnvironmentTask, GroundAtom, Object, \
@@ -257,7 +257,7 @@ class PyBulletFanEnv(PyBulletEnv):
     # -------------------------------------------------------------------------
     # Environment initialization
     # -------------------------------------------------------------------------
-    def __init__(self, use_gui: bool = False) -> None:
+    def __init__(self, use_gui: bool = False, **kwargs: Any) -> None:
         self._robot = Object("robot", self._robot_type)
 
         # Fans - create one fan object per side instead of multiple
@@ -300,7 +300,7 @@ class PyBulletFanEnv(PyBulletEnv):
         # Target
         self._target = Object("target", self._target_type)
 
-        super().__init__(use_gui=use_gui)
+        super().__init__(use_gui=use_gui, **kwargs)
 
         # Define new predicates if desired
         self._FanOn = Predicate(
@@ -610,7 +610,7 @@ class PyBulletFanEnv(PyBulletEnv):
         self._target.id = pybullet_bodies["target_id"]
 
         # Initialize boundary wall IDs list (will be populated
-        # in _reset_custom_env_state)
+        # in _set_domain_specific_state)
         # pylint: disable=attribute-defined-outside-init
         self._boundary_wall_ids: List[int] = []
 
@@ -620,10 +620,7 @@ class PyBulletFanEnv(PyBulletEnv):
     def _get_object_ids_for_held_check(self) -> List[int]:
         return []
 
-    def _create_task_specific_objects(self, state: State) -> None:
-        pass
-
-    def _reset_custom_env_state(self, state: State) -> None:
+    def _set_domain_specific_state(self, state: State) -> None:
         for switch_obj in self._switches:
             is_on_val = state.get(switch_obj, "is_on")
             self._set_switch_on(switch_obj.id, bool(is_on_val > 0.5))
@@ -838,7 +835,7 @@ class PyBulletFanEnv(PyBulletEnv):
                                   orientation=p.getQuaternionFromEuler(rot),
                                   physics_client_id=self._physics_client_id)
 
-    def _extract_feature(self, obj: Object, feature: str) -> float:
+    def _get_domain_specific_feature(self, obj: Object, feature: str) -> float:
         """Extract features for creating the State object."""
         if obj.type == self._fan_type:
             if feature == "facing_side":
@@ -875,18 +872,12 @@ class PyBulletFanEnv(PyBulletEnv):
     # -------------------------------------------------------------------------
     # Step
     # -------------------------------------------------------------------------
-    def step(  # pylint: disable=redefined-outer-name
-            self,
-            action: Action,
-            render_obs: bool = False) -> State:
-        """Execute a low-level action, then spin fans & blow the ball."""
-        super().step(action, render_obs=render_obs)
+    def _domain_specific_step(self) -> None:
+        """Spin fans & blow the ball."""
         self._simulate_fans()
-        final_state = self._get_state()
-        self._current_observation = final_state
+        state = self._get_state()
         # Draw a debug line at the ball's position
-        bx, by = final_state.get(self._ball,
-                                 "x"), final_state.get(self._ball, "y")
+        bx, by = state.get(self._ball, "x"), state.get(self._ball, "y")
         p.addUserDebugLine(
             [bx, by, self.table_height],
             [bx, by, self.table_height + self.debug_line_height],
@@ -894,7 +885,6 @@ class PyBulletFanEnv(PyBulletEnv):
             lifeTime=self.
             debug_line_lifetime,  # short lifetime so each step refreshes
             physicsClientId=self._physics_client_id)
-        return final_state
 
     # -------------------------------------------------------------------------
     # Fan Simulation
@@ -1633,7 +1623,7 @@ if __name__ == "__main__":
         CFG.fan_train_num_walls_per_task, _rng)
 
     for _task in _tasks:
-        env._reset_state(_task.init)  # pylint: disable=protected-access
+        env._set_state(_task.init)  # pylint: disable=protected-access
         for _ in range(5000):
             _action = Action(
                 np.array(env._pybullet_robot  # pylint: disable=protected-access

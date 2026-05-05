@@ -9,9 +9,10 @@ import numpy as np
 import pybullet as p
 
 from predicators import utils
-from predicators.envs.pybullet_env import PyBulletEnv, create_pybullet_block
+from predicators.envs.pybullet_env import PyBulletEnv
 from predicators.pybullet_helpers.geometry import Pose3D, Quaternion
-from predicators.pybullet_helpers.objects import create_object, update_object
+from predicators.pybullet_helpers.objects import create_object, \
+    create_pybullet_block, update_object
 from predicators.pybullet_helpers.robots import SingleArmPyBulletRobot
 from predicators.settings import CFG
 from predicators.structs import Action, DerivedPredicate, EnvironmentTask, \
@@ -173,7 +174,7 @@ class PyBulletBoilEnv(PyBulletEnv):
     _human_type = Type("human", ["happiness_level"],
                        sim_features=["id", "happiness_level"])
 
-    def __init__(self, use_gui: bool = False) -> None:
+    def __init__(self, use_gui: bool = False, **kwargs: Any) -> None:
         # Create the robot as an Object
         self._robot = Object("robot", self._robot_type)
 
@@ -212,7 +213,7 @@ class PyBulletBoilEnv(PyBulletEnv):
         # Keep track of the spilled water block (None if no spill yet)
         self._spilled_water_id: Optional[int] = None
 
-        super().__init__(use_gui)
+        super().__init__(use_gui, **kwargs)
 
         # Optionally, define some relevant predicates
         self._JugFilled = Predicate("JugFilled", [self._jug_type],
@@ -491,11 +492,7 @@ class PyBulletBoilEnv(PyBulletEnv):
         jug_ids = [j.id for j in self._jugs if j.id is not None]
         return jug_ids
 
-    def _create_task_specific_objects(self, state: State) -> None:
-        """If you wanted additional objects depending on a given state, add
-        them here."""
-
-    def _extract_feature(self, obj: Object, feature: str) -> float:
+    def _get_domain_specific_feature(self, obj: Object, feature: str) -> float:
         """Map from environment object + feature name -> a float feature in the
         State."""
         # Faucet
@@ -558,8 +555,8 @@ class PyBulletBoilEnv(PyBulletEnv):
         # Otherwise, rely on defaults (like the base PyBulletEnv) for x,y,z,...
         raise ValueError(f"Unknown feature {feature} for object {obj}.")
 
-    def _reset_custom_env_state(self, state: State) -> None:
-        """Called in _reset_state to do any environment-specific resetting.
+    def _set_domain_specific_state(self, state: State) -> None:
+        """Called in _set_state to do any environment-specific resetting.
 
         This environment only supports resetting the state at the
         beginning, because the state dict doesn't include all features
@@ -570,7 +567,7 @@ class PyBulletBoilEnv(PyBulletEnv):
         for i, burner_obj in enumerate(burners):
             on_val = state.get(burner_obj, "is_on")
             burner_obj.switch_id = self._burner_switches[i].id
-            burner_obj.prev_on = 0.0  # Initialize prev_on to 0
+            burner_obj.prev_on = 0.0
             self._set_switch_on(self._burner_switches[i].id,
                                 bool(on_val > 0.5))
 
@@ -588,6 +585,8 @@ class PyBulletBoilEnv(PyBulletEnv):
             liquid_id = self._create_liquid_for_jug(jug, state)
             self._jug_to_liquid_id[jug] = liquid_id
 
+        self._update_liquid_colors(state)
+
         # Update jug body colors from state
         for jug in jugs:
             if jug.id is not None:
@@ -600,7 +599,7 @@ class PyBulletBoilEnv(PyBulletEnv):
 
         # Faucet on/off
         self._faucet.switch_id = self._faucet_switch.id
-        self._faucet.prev_on = 0.0  # Initialize prev_on to 0
+        self._faucet.prev_on = 0.0
         f_on = state.get(self._faucet, "is_on")
         self._set_switch_on(self._faucet_switch.id, bool(f_on > 0.5))
 
@@ -615,7 +614,6 @@ class PyBulletBoilEnv(PyBulletEnv):
         self._faucet._spilled_level = -self.water_fill_speed * 20
         spilled_level = max(0.0, self._faucet._spilled_level)
         # pylint: enable=protected-access
-        # If there's already some spillage in the state, recreate a block
         if spilled_level > 0.0:
             self._spilled_water_id = self._create_spilled_water_block(
                 spilled_level, state)
@@ -627,17 +625,14 @@ class PyBulletBoilEnv(PyBulletEnv):
 
         # Move irrelevant jugs and burners out of the way
         oov_x, oov_y = self._out_of_view_xy
-        jugs = state.get_objects(self._jug_type)
         for i in range(len(jugs), len(self._jugs)):
             update_object(self._jugs[i].id,
                           position=(oov_x, oov_y, 0.0),
                           physics_client_id=self._physics_client_id)
-        burners = state.get_objects(self._burner_type)
         for i in range(len(burners), len(self._burners)):
             update_object(self._burners[i].id,
                           position=(oov_x, oov_y, 0.0),
                           physics_client_id=self._physics_client_id)
-            # Also move the corresponding switch
             update_object(self._burner_switches[i].id,
                           position=(oov_x, oov_y, self.switch_height),
                           physics_client_id=self._physics_client_id)
@@ -648,34 +643,15 @@ class PyBulletBoilEnv(PyBulletEnv):
     # -------------------------------------------------------------------------
     # Step Logic
     # -------------------------------------------------------------------------
-    def step(self, action: Action, render_obs: bool = False) -> State:
-        """Execute a low-level action (robot controls), then handle water
-        filling/spillage and heating."""
-        # First let the base environment perform the usual PyBullet step
-        next_state = super().step(action, render_obs=False)
-
-        # 1) Handle faucet filling/spillage
-        self._handle_faucet_logic(next_state)
-
-        # 2) Handle burner heating
-        self._handle_heating_logic(next_state)
-
-        # 3) Update jug colors based on their 'heat'
-        self._update_jug_colors(next_state)
-
-        # 4) Update burner colors based on their on/off state
-        self._update_burner_colors(next_state)
-
-        # 5) Update the human's happiness level
-        self._update_human_happiness(next_state)
-
-        # 6) Update prev_on states for next step
-        self._update_prev_on_states(next_state)
-
-        # Re-read final state
-        final_state = self.get_observation(render=render_obs)
-        self._current_observation = final_state
-        return final_state
+    def _domain_specific_step(self) -> None:
+        """Handle water filling/spillage, heating, and happiness."""
+        state = self._get_state()
+        self._handle_faucet_logic(state)
+        self._handle_heating_logic(state)
+        self._update_liquid_colors(state)
+        self._update_burner_colors(state)
+        self._update_human_happiness(state)
+        self._update_prev_on_states(state)
 
     def _handle_faucet_logic(self, state: State) -> None:
         """If faucet is on, fill any jug that is properly aligned; otherwise,
@@ -790,7 +766,7 @@ class PyBulletBoilEnv(PyBulletEnv):
                         new_heat = min(1.0, old_heat + self.heating_speed)
                         jug_obj.heat_level = new_heat
 
-    def _update_jug_colors(self, state: State) -> None:
+    def _update_liquid_colors(self, state: State) -> None:
         """Simple linear interpolation from blue (0.0) to red (1.0) based on
         jug.heat."""
         jugs = state.get_objects(self._jug_type)
@@ -927,7 +903,7 @@ class PyBulletBoilEnv(PyBulletEnv):
                               j_id,
                               physicsClientId=self._physics_client_id)
         j_min, j_max = info[8], info[9]
-        target_val = j_max if power_on else j_min
+        target_val = (j_max if power_on else j_min) * self.switch_joint_scale
         p.resetJointState(switch_id,
                           j_id,
                           target_val,
@@ -1388,6 +1364,8 @@ class PyBulletBoilEnv(PyBulletEnv):
         cx = state.get(jug, "x")
         cy = state.get(jug, "y")
         cz = self.z_lb + liquid_height / 2 + 0.02  # sits on table
+        jug_rot = state.get(jug, "rot")
+        orientation = p.getQuaternionFromEuler([0.0, 0.0, jug_rot])
 
         color = self.water_color
         return create_pybullet_block(color=color,
@@ -1395,6 +1373,7 @@ class PyBulletBoilEnv(PyBulletEnv):
                                      mass=0.01,
                                      friction=0.5,
                                      position=(cx, cy, cz),
+                                     orientation=orientation,
                                      physics_client_id=self._physics_client_id)
 
 
@@ -1445,7 +1424,7 @@ if __name__ == "__main__":
              burner1, faucet)
 
         for task in tasks:
-            env._reset_state(task.init)
+            env._set_state(task.init)
             for _ in range(20000):
                 action = Action(
                     np.array(env._pybullet_robot.initial_joint_positions))

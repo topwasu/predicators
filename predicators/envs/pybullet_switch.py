@@ -89,17 +89,18 @@ class PyBulletSwitchEnv(PyBulletEnv):
         sim_features=["id", "joint_id", "joint_scale", "color_count"])
     _light_type = Type("light", ["x", "y", "z", "rot", "is_on", "color_index"])
 
-    def __init__(self, use_gui: bool = False) -> None:
+    def __init__(self, use_gui: bool = False, **kwargs: Any) -> None:
         # Objects
         self._robot = Object("robot", self._robot_type)
         self._power_switch = Object("power_switch", self._power_switch_type)
         self._color_switch = Object("color_switch", self._color_switch_type)
         self._light = Object("light", self._light_type)
 
-        super().__init__(use_gui)
+        super().__init__(use_gui, **kwargs)
 
         # Track previous switch states for edge detection
         self._prev_color_switch_on: bool = False
+        self._pre_step_color_count: int = 0
 
         # Predicates
         self._PowerOn = Predicate("PowerOn", [self._power_switch_type],
@@ -223,7 +224,7 @@ class PyBulletSwitchEnv(PyBulletEnv):
         """Return IDs of objects that can be held (none in this env)."""
         return []
 
-    def _extract_feature(self, obj: Object, feature: str) -> float:
+    def _get_domain_specific_feature(self, obj: Object, feature: str) -> float:
         """Extract features for creating the State object."""
         if obj.type == self._light_type and feature == "is_on":
             return float(self._is_power_switch_on())
@@ -236,42 +237,33 @@ class PyBulletSwitchEnv(PyBulletEnv):
             return float(self._is_switch_on(self._color_switch))
         raise ValueError(f"Unknown feature {feature} for object {obj}")
 
-    def _create_task_specific_objects(self, state: State) -> None:
-        del state  # Unused
-
-    def _reset_custom_env_state(self, state: State) -> None:
-        """Reset environment state from a State object."""
-        # Set power switch state
+    def _set_domain_specific_state(self, state: State) -> None:
+        """Set switch positions, tracking vars, color count, and light
+        visual."""
         power_on = state.get(self._power_switch, "is_on") > 0.5
         self._set_switch_state(self._power_switch, power_on)
 
-        # Set color switch state
         color_switch_on = state.get(self._color_switch, "is_on") > 0.5
         self._set_switch_state(self._color_switch, color_switch_on)
 
-        # Track previous color switch state for edge detection
         self._prev_color_switch_on = color_switch_on
 
-        # Initialize color_count from light's color_index
         color_index = int(state.get(self._light, "color_index"))
         self._color_switch.color_count = color_index
 
-        # Update light visual
         self._update_light_visual(power_on, color_index)
 
     def step(self, action: Action, render_obs: bool = False) -> State:
-        """Process a single action step."""
-        # Get current color_count from sim_feature
-        prev_color_count = self._color_switch.color_count
+        """Save pre-step color count before kinematics."""
+        self._pre_step_color_count = self._color_switch.color_count
+        return super().step(action, render_obs=render_obs)
 
-        # Execute the action
-        super().step(action, render_obs=render_obs)
-
+    def _domain_specific_step(self) -> None:
         # Detect color switch toggle (OFF -> ON transition)
         curr_color_switch_on = self._is_switch_on(self._color_switch)
         if not self._prev_color_switch_on and curr_color_switch_on:
             # Rising edge detected - increment color count
-            self._color_switch.color_count = prev_color_count + 1
+            self._color_switch.color_count = self._pre_step_color_count + 1
 
         self._prev_color_switch_on = curr_color_switch_on
 
@@ -284,11 +276,6 @@ class PyBulletSwitchEnv(PyBulletEnv):
 
         # Update light visual
         self._update_light_visual(power_on, color_index)
-
-        # Get updated state with correct light values
-        final_state = self._get_state()
-        self._current_observation = final_state
-        return final_state
 
     # -------------------------------------------------------------------------
     # Switch helpers
@@ -465,7 +452,7 @@ if __name__ == "__main__":
     CFG.num_train_tasks = 1
     env = PyBulletSwitchEnv(use_gui=True)
     task = env._generate_train_tasks()[0]  # pylint: disable=protected-access
-    env._reset_state(task.init)  # pylint: disable=protected-access
+    env._set_state(task.init)  # pylint: disable=protected-access
 
     while True:
         _joints = env._pybullet_robot.initial_joint_positions  # pylint: disable=protected-access
